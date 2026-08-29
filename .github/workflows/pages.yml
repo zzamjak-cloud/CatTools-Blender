@@ -24,6 +24,11 @@ jobs:
       BLENDER_SHA256: a31f524fa99a527d3d52b7f5aaa68c34e1a19d5a1c9473f79c5cc610fd5b10e9
       GH_TOKEN: ${{ github.token }}
     steps:
+      - name: 소스 체크아웃
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: 모든 릴리스 패키지 다운로드
         shell: bash
         run: |
@@ -79,6 +84,7 @@ jobs:
 
           blender_binary="${RUNNER_TEMP}/blender-${BLENDER_VERSION}-linux-x64/blender"
           "${blender_binary}" --command extension server-generate --repo-dir=site --html
+          python3 scripts/sort_repository_index.py site/index.json
           test -s site/index.json
           test -s site/index.html
 

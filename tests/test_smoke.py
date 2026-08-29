@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
+import json
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -17,6 +20,7 @@ DEV_RUN_PATH = ROOT / "scripts" / "dev_run.sh"
 WINDOWS_DEV_RUN_PATH = ROOT / "scripts" / "dev_run.ps1"
 WINDOWS_DEV_WRAPPER_PATH = ROOT / "scripts" / "dev_run.bat"
 DEV_BOOTSTRAP_PATH = ROOT / "scripts" / "dev_bootstrap.py"
+SORT_REPOSITORY_INDEX_PATH = ROOT / "scripts" / "sort_repository_index.py"
 DEV_PROFILE_SMOKE_PATH = ROOT / "tests" / "blender_dev_profile_smoke.py"
 MIRROR_SMOKE_PATH = ROOT / "tests" / "blender_mirror_smoke.py"
 
@@ -202,6 +206,11 @@ class CatToolsSmokeTest(unittest.TestCase):
             workflow,
         )
         self.assertIn(
+            "python3 scripts/sort_repository_index.py site/index.json",
+            workflow,
+        )
+        self.assertIn("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", workflow)
+        self.assertIn(
             "actions/upload-pages-artifact@"
             "fc324d3547104276b827a68afc52ff2a11cc49c9",
             workflow,
@@ -220,6 +229,41 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         self.assertIn("Check for Updates on Startup", readme)
         self.assertNotIn("Install from Disk", readme)
+
+    def test_repository_index_versions_are_sorted_ascending(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "sort_repository_index",
+            SORT_REPOSITORY_INDEX_PATH,
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            index_path = Path(temporary_directory) / "index.json"
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "version": "v1",
+                        "data": [
+                            {"id": "cat_tools", "version": "1.0.2"},
+                            {"id": "cat_tools", "version": "1.0.0"},
+                            {"id": "cat_tools", "version": "1.0.10"},
+                            {"id": "cat_tools", "version": "1.0.1"},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            module.sort_index(index_path)
+            versions = [
+                item["version"]
+                for item in json.loads(index_path.read_text(encoding="utf-8"))["data"]
+            ]
+        self.assertEqual(versions, ["1.0.0", "1.0.1", "1.0.2", "1.0.10"])
 
     def test_isolated_development_runner(self) -> None:
         script = DEV_RUN_PATH.read_text(encoding="utf-8")
