@@ -1,0 +1,27 @@
+schema_version = "1.0.0"
+
+id = "cat_tools"
+version = "1.0.0"
+name = "CatTools"
+tagline = "CAT 블록 모델링을 돕는 도구 모음"
+maintainer = "Woody"
+type = "add-on"
+
+tags = ["Modeling", "Material"]
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+copyright = ["2026 Woody"]
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/.git/",
+  "/.github/",
+  "/.serena/",
+  "/.gitignore",
+  "/*.zip",
+  "/build/",
+  "/dist/",
+  "/scripts/",
+  "/tests/",
+]

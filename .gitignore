@@ -1,0 +1,19 @@
+# 로컬 도구 설정
+.serena/
+
+# 파이썬 캐시와 테스트 산출물
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Blender와 운영체제 임시 파일
+*.blend1
+*.blend2
+.DS_Store
+
+# 패키지 빌드 산출물
+dist/
+build/
+*.zip

@@ -1,0 +1,28 @@
+name: 검사
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 소스 체크아웃
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Python 설정
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: 회귀 검사
+        run: python3 -m unittest discover -s tests -v
+      - name: Extension 패키지 생성
+        run: python3 scripts/build_extension.py --output dist/cat_tools-ci.zip
+      - name: 패키지 내용 확인
+        run: unzip -l dist/cat_tools-ci.zip
