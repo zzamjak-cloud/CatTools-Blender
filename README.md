@@ -31,14 +31,15 @@ CatTools는 기존 Woody Tools의 연산자 식별자를 유지하므로 두 애
 
 이전 Blender 버전의 Woody Tools 설치본과 Google Drive 원본은 자동으로 삭제하지 않습니다.
 
-### GitHub Release 패키지
+### 원격 저장소 설치
 
-1. GitHub Releases에서 `cat_tools-v1.0.0.zip`을 내려받습니다.
-2. Blender에서 **Edit > Preferences > Get Extensions**를 엽니다.
-3. 오른쪽 위 메뉴에서 **Install from Disk**를 선택하고 ZIP 파일을 지정합니다.
-4. 3D 뷰포트 사이드바의 **CatTools** 탭을 엽니다.
+1. Blender에서 **Edit > Preferences > Get Extensions**를 엽니다.
+2. **Repositories**에서 `+`를 누르고 **Add Remote Repository**를 선택합니다.
+3. URL에 `https://zzamjak-cloud.github.io/CatTools-Blender/index.json`을 입력하고 저장소를 추가합니다.
+4. 저장소를 동기화한 뒤 `CatTools`를 검색해 **Install**을 누릅니다.
+5. 3D 뷰포트 사이드바의 **CatTools** 탭을 엽니다.
 
-ZIP 파일은 풀지 않고 설치합니다.
+추후 업데이트를 자동으로 확인하려면 추가한 원격 저장소의 **Check for Updates on Startup**을 켭니다. 새 버전 알림이 표시되면 **Update** 또는 **Install Available Updates**로 갱신합니다.
 
 ### 개발 버전
 
@@ -46,7 +47,7 @@ ZIP 파일은 풀지 않고 설치합니다.
 python3 scripts/build_extension.py
 ```
 
-생성된 `dist/cat_tools-v1.0.0.zip`을 Blender에서 설치합니다.
+생성된 `dist/cat_tools-v1.0.0.zip`은 릴리스와 원격 저장소 생성에 사용하는 개발용 패키지입니다.
 
 ## 검사
 

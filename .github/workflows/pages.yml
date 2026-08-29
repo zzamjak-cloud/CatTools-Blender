@@ -1,0 +1,103 @@
+name: Extension 저장소 배포
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["릴리스"]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      BLENDER_VERSION: "5.2.1"
+      BLENDER_SHA256: a31f524fa99a527d3d52b7f5aaa68c34e1a19d5a1c9473f79c5cc610fd5b10e9
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: 모든 릴리스 패키지 다운로드
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p site
+          asset_list="${RUNNER_TEMP}/cat-tools-assets.tsv"
+
+          gh api --paginate \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | select(.draft == false) | .assets[] | select(.name | test("^cat_tools-v.*\\.zip$")) | [.id, .name] | @tsv' \
+            > "${asset_list}"
+
+          if [[ ! -s "${asset_list}" ]]; then
+            echo "배포할 cat_tools-v*.zip 릴리스 자산이 없습니다." >&2
+            exit 1
+          fi
+
+          duplicate_names="$(cut -f2 "${asset_list}" | sort | uniq -d)"
+          if [[ -n "${duplicate_names}" ]]; then
+            echo "서로 다른 릴리스에 같은 이름의 자산이 있습니다:" >&2
+            echo "${duplicate_names}" >&2
+            exit 1
+          fi
+
+          while IFS=$'\t' read -r asset_id asset_name; do
+            echo "${asset_name} 다운로드"
+            gh api \
+              -H "Accept: application/octet-stream" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
+              > "site/${asset_name}"
+          done < "${asset_list}"
+
+      - name: Blender 5.2.1 준비
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          blender_archive="blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          blender_archive_path="${RUNNER_TEMP}/${blender_archive}"
+          curl --fail --location --retry 3 \
+            --output "${blender_archive_path}" \
+            "https://download.blender.org/release/Blender5.2/${blender_archive}"
+          echo "${BLENDER_SHA256}  ${blender_archive_path}" | sha256sum --check --strict
+          tar --extract --xz --file "${blender_archive_path}" --directory "${RUNNER_TEMP}"
+
+      - name: Extension 저장소 인덱스 생성
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          blender_binary="${RUNNER_TEMP}/blender-${BLENDER_VERSION}-linux-x64/blender"
+          "${blender_binary}" --command extension server-generate --repo-dir=site --html
+          test -s site/index.json
+          test -s site/index.html
+
+      - name: Pages 아티팩트 업로드
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: GitHub Pages 배포
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

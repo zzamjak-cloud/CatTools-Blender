@@ -7,3 +7,4 @@
 - 기존 등록 클래스 순서와 `bl_idname`을 유지했습니다.
 - Blender 4.2 이상용 Extension 매니페스트를 추가했습니다.
 - GitHub Actions 검사 및 태그 기반 릴리스 패키징을 추가했습니다.
+- GitHub Pages 기반 Blender 원격 Extension 저장소와 자동 업데이트 경로를 추가했습니다.

@@ -11,6 +11,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ADDON_PATH = ROOT / "__init__.py"
 MANIFEST_PATH = ROOT / "blender_manifest.toml"
+PAGES_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "pages.yml"
+README_PATH = ROOT / "README.md"
 
 EXPECTED_REGISTERED_CLASSES = [
     "OBJECT_PT_WoodyTool",
@@ -122,6 +124,36 @@ class CatToolsSmokeTest(unittest.TestCase):
                     assignment_value(self.classes[panel_name], "bl_category"),
                     "CatTools",
                 )
+
+    def test_remote_repository_distribution(self) -> None:
+        workflow = PAGES_WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertIn('workflows: ["릴리스"]', workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn('test("^cat_tools-v.*\\\\.zip$")', workflow)
+        self.assertIn(
+            '"${blender_binary}" --command extension server-generate '
+            "--repo-dir=site --html",
+            workflow,
+        )
+        self.assertIn(
+            "actions/upload-pages-artifact@"
+            "fc324d3547104276b827a68afc52ff2a11cc49c9",
+            workflow,
+        )
+        self.assertIn(
+            "actions/deploy-pages@"
+            "cd2ce8fcbc39b97be8ca5fce6e763baed58fa128",
+            workflow,
+        )
+
+    def test_remote_repository_installation_guide(self) -> None:
+        readme = README_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            "https://zzamjak-cloud.github.io/CatTools-Blender/index.json",
+            readme,
+        )
+        self.assertIn("Check for Updates on Startup", readme)
+        self.assertNotIn("Install from Disk", readme)
 
 
 if __name__ == "__main__":
