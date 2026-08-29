@@ -43,6 +43,8 @@ CatTools는 기존 Woody Tools의 연산자 식별자를 유지하므로 두 애
 
 ### 개발 버전
 
+#### macOS
+
 macOS에서는 전용 `CatToolsBlenderDev/<Blender 버전>` 프로필로 개발 소스를 실행할 수 있습니다. 이 방식은 기본 Blender 프로필과 원격 설치본을 변경하지 않으며, 저장소 루트를 `extensions/user_default/cat_tools`에 심링크한 뒤 `bl_ext.user_default.cat_tools`를 자동으로 활성화합니다.
 
 ```bash
@@ -70,6 +72,31 @@ BLENDER_VERSION=5.3 BLENDER_BIN="/Applications/Blender 5.3.app/Contents/MacOS/Bl
 ```
 
 기능 수정 중에는 이 개발 프로필을 사용하며 GitHub 릴리스나 원격 설치본을 매번 갱신할 필요가 없습니다.
+
+#### Windows
+
+Windows에서는 포터블 Blender 전용 경로를 사용해 일반 설치본과 개발 설정을 분리합니다. 기본 경로는 `D:\Tools\Blender-5.2-CatToolsDev`이며, 저장소 루트를 `portable\extensions\user_default\cat_tools`에 디렉터리 Junction으로 연결합니다. 실제 폴더가 이미 있으면 사용자 파일 보호를 위해 중단하고, 대상이 잘못된 Junction이나 심링크만 안전하게 다시 연결합니다.
+
+PowerShell에서는 다음 명령으로 GUI 개발 환경을 실행합니다. 다른 위치의 포터블 Blender는 `-BlenderDir`로 지정할 수 있습니다.
+
+```powershell
+.\scripts\dev_run.ps1
+.\scripts\dev_run.ps1 -BlenderDir "E:\Tools\Blender-5.2-CatToolsDev"
+```
+
+연결만 준비하거나 백그라운드에서 Python 검사·표현식을 실행할 수도 있습니다. 모든 Python 실행에는 `--python-exit-code 1`이 적용되며, 사용자 코드 전에 `bl_ext.user_default.cat_tools`를 활성화하는 공용 부트스트랩이 실행됩니다.
+
+```powershell
+.\scripts\dev_run.ps1 -LinkOnly
+.\scripts\dev_run.ps1 -Background -PythonFile ".\tests\blender_dev_profile_smoke.py"
+.\scripts\dev_run.ps1 -Background -PythonExpr "import bpy; print(bpy.app.version_string)"
+```
+
+명령 프롬프트에서는 같은 인자를 배치 래퍼로 전달합니다.
+
+```bat
+.\scripts\dev_run.bat -Background -PythonFile ".\tests\blender_mirror_smoke.py"
+```
 
 배포용 Extension 패키지는 다음 명령으로 생성합니다.
 

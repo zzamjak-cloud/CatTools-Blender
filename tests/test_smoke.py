@@ -14,6 +14,8 @@ MANIFEST_PATH = ROOT / "blender_manifest.toml"
 PAGES_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "pages.yml"
 README_PATH = ROOT / "README.md"
 DEV_RUN_PATH = ROOT / "scripts" / "dev_run.sh"
+WINDOWS_DEV_RUN_PATH = ROOT / "scripts" / "dev_run.ps1"
+WINDOWS_DEV_WRAPPER_PATH = ROOT / "scripts" / "dev_run.bat"
 DEV_BOOTSTRAP_PATH = ROOT / "scripts" / "dev_bootstrap.py"
 DEV_PROFILE_SMOKE_PATH = ROOT / "tests" / "blender_dev_profile_smoke.py"
 MIRROR_SMOKE_PATH = ROOT / "tests" / "blender_mirror_smoke.py"
@@ -276,6 +278,37 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertIn("profile != default_profile", runtime_smoke)
         self.assertIn('"woody" in module_name.lower()', runtime_smoke)
 
+    def test_windows_portable_development_runner(self) -> None:
+        self.assertTrue(
+            WINDOWS_DEV_RUN_PATH.read_bytes().startswith(b"\xef\xbb\xbf"),
+            "Windows PowerShell 5.1 호환을 위해 UTF-8 BOM이 필요합니다.",
+        )
+        script = WINDOWS_DEV_RUN_PATH.read_text(encoding="utf-8-sig")
+        wrapper = WINDOWS_DEV_WRAPPER_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('[string]$BlenderDir = "D:\\Tools\\Blender-5.2-CatToolsDev"', script)
+        self.assertIn("$AddonId = 'cat_tools'", script)
+        self.assertIn("$ModuleName = 'bl_ext.user_default.cat_tools'", script)
+        self.assertIn("Join-Path $BlenderDir 'portable'", script)
+        self.assertIn("'extensions\\user_default'", script)
+        self.assertIn("New-Item -ItemType Junction", script)
+        self.assertIn("@('Junction', 'SymbolicLink')", script)
+        self.assertIn("if ($ExistingItem.PSIsContainer)", script)
+        self.assertIn("[System.IO.Directory]::Delete($AddonLink, $false)", script)
+        self.assertIn("[System.IO.File]::Delete($AddonLink)", script)
+        self.assertIn("사용자 파일을 보호하기 위해 자동으로 삭제하지 않습니다.", script)
+        self.assertIn("[switch]$LinkOnly", script)
+        self.assertIn("[switch]$Background", script)
+        self.assertIn("[string]$PythonExpr", script)
+        self.assertIn("[string]$PythonFile", script)
+        self.assertIn("@('--python-exit-code', '1')", script)
+        self.assertIn("@('--python', $BootstrapScript)", script)
+        self.assertIn("& $BlenderExecutable @BlenderArguments", script)
+
+        self.assertIn("powershell -NoProfile -ExecutionPolicy Bypass", wrapper)
+        self.assertIn('"%~dp0dev_run.ps1" %*', wrapper)
+        self.assertIn("exit /b %ERRORLEVEL%", wrapper)
+
     def test_mirror_smoke_uses_enabled_development_extension(self) -> None:
         source = MIRROR_SMOKE_PATH.read_text(encoding="utf-8")
         compile(source, str(MIRROR_SMOKE_PATH), "exec")
@@ -294,6 +327,10 @@ class CatToolsSmokeTest(unittest.TestCase):
             "--background --python tests/blender_dev_profile_smoke.py",
             readme,
         )
+        self.assertIn("D:\\Tools\\Blender-5.2-CatToolsDev", readme)
+        self.assertIn(".\\scripts\\dev_run.ps1 -LinkOnly", readme)
+        self.assertIn("-Background -PythonFile", readme)
+        self.assertIn(".\\scripts\\dev_run.bat", readme)
 
 
 if __name__ == "__main__":
