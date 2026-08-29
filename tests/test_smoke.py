@@ -50,6 +50,12 @@ EXPECTED_IDNAMES = {
     "Add_Mirror_Z_Modifier": "wm.add_mirror_z_modifier",
 }
 
+MIRROR_AXES = {
+    "Add_Mirror_X_Modifier": "x",
+    "Add_Mirror_Y_Modifier": "y",
+    "Add_Mirror_Z_Modifier": "z",
+}
+
 
 def assignment_value(node: ast.ClassDef, name: str):
     for statement in node.body:
@@ -77,7 +83,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], "1.0.0")
         self.assertEqual(manifest["id"], "cat_tools")
         self.assertEqual(manifest["name"], "CatTools")
-        self.assertEqual(manifest["version"], "1.0.0")
+        self.assertEqual(manifest["version"], "1.0.1")
         self.assertEqual(manifest["blender_version_min"], "4.2.0")
         self.assertIn("SPDX:GPL-3.0-or-later", manifest["license"])
 
@@ -90,7 +96,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         info = ast.literal_eval(info_node.value)
         self.assertEqual(info["name"], "CatTools")
-        self.assertEqual(info["version"], (1, 0, 0))
+        self.assertEqual(info["version"], (1, 0, 1))
         self.assertEqual(info["blender"], (4, 2, 0))
 
     def test_registered_class_order(self) -> None:
@@ -109,6 +115,60 @@ class CatToolsSmokeTest(unittest.TestCase):
             for class_name in EXPECTED_IDNAMES
         }
         self.assertEqual(actual, EXPECTED_IDNAMES)
+
+    def test_mirror_operators_preserve_positive_side(self) -> None:
+        for class_name, axis in MIRROR_AXES.items():
+            with self.subTest(axis=axis):
+                operator = self.classes[class_name]
+                execute = next(
+                    node
+                    for node in operator.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "execute"
+                )
+                comparisons = {
+                    ast.unparse(node)
+                    for node in ast.walk(execute)
+                    if isinstance(node, ast.Compare)
+                }
+                self.assertIn(
+                    f"-0.01 < vertex.co.{axis} < 0",
+                    comparisons,
+                )
+                self.assertIn(
+                    f"vertex.co.{axis} < 0.0",
+                    comparisons,
+                )
+
+    def test_mirror_delete_is_guarded_when_side_is_empty(self) -> None:
+        for class_name in MIRROR_AXES:
+            with self.subTest(operator=class_name):
+                operator = self.classes[class_name]
+                execute = next(
+                    node
+                    for node in operator.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "execute"
+                )
+                guard = next(
+                    node
+                    for node in ast.walk(execute)
+                    if isinstance(node, ast.If)
+                    and isinstance(node.test, ast.Name)
+                    and node.test.id == "vertices_to_delete"
+                )
+                delete_call = next(
+                    node
+                    for node in ast.walk(guard)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "delete"
+                )
+                geom_keyword = next(
+                    keyword
+                    for keyword in delete_call.keywords
+                    if keyword.arg == "geom"
+                )
+                self.assertIsInstance(geom_keyword.value, ast.Name)
+                self.assertEqual(geom_keyword.value.id, "vertices_to_delete")
 
     def test_panel_branding(self) -> None:
         main_panel = self.classes["OBJECT_PT_WoodyTool"]

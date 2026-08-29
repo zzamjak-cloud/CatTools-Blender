@@ -5,7 +5,7 @@ CatTools는 CAT 블록 모델링 작업에 사용해 온 **Woody Tools**의 최�
 ## 요구 사항
 
 - Blender 4.2 이상
-- CatTools 1.0.0
+- CatTools 1.0.1
 
 ## 제공 기능
 
@@ -13,7 +13,7 @@ CatTools는 CAT 블록 모델링 작업에 사용해 온 **Woody Tools**의 최�
 - 양면 텍스처 및 2·3·4 텍스처 셰이더 구성
 - 선택 오브젝트의 원형 배열
 - 래티스 생성 및 연결
-- X·Y·Z 미러 모디파이어 추가
+- X·Y·Z 양수 영역을 보존하고 음수 영역을 정리한 뒤 미러 모디파이어 추가
 
 과거 스크립트에 있었지만 등록 목록에서 주석 처리된 실험 기능은 이번 버전에서도 노출하지 않습니다.
 
@@ -47,7 +47,7 @@ CatTools는 기존 Woody Tools의 연산자 식별자를 유지하므로 두 애
 python3 scripts/build_extension.py
 ```
 
-생성된 `dist/cat_tools-v1.0.0.zip`은 릴리스와 원격 저장소 생성에 사용하는 개발용 패키지입니다.
+생성된 `dist/cat_tools-v1.0.1.zip`은 릴리스와 원격 저장소 생성에 사용하는 개발용 패키지입니다.
 
 ## 검사
 
@@ -55,7 +55,13 @@ python3 scripts/build_extension.py
 python3 -m unittest discover -s tests -v
 ```
 
-검사는 Python 문법, Extension 매니페스트, 등록 클래스 순서, 기존 `bl_idname` 호환성을 확인합니다. 첫 릴리스는 Blender 5.2 LTS에서 등록·해제와 등록 연산자 10개 실행을 검증했습니다.
+Blender가 설치된 환경에서는 실제 미러 동작도 확인할 수 있습니다.
+
+```bash
+blender --background --factory-startup --python tests/blender_mirror_smoke.py
+```
+
+검사는 Python 문법, Extension 매니페스트, 등록 클래스 순서, 기존 `bl_idname` 호환성과 X·Y·Z 미러 방향을 확인합니다. 첫 릴리스는 Blender 5.2 LTS에서 등록·해제와 등록 연산자 10개 실행을 검증했습니다.
 
 ## 라이선스
 

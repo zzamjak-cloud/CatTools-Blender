@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 0, 0),
+    "version": (1, 0, 1),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -912,25 +912,19 @@ class Add_Mirror_X_Modifier(Operator):
         # BMesh 생성
         bm = bmesh.from_edit_mesh(obj.data)
 
-        # 0 < x < 0.01 사이의 vertex는 모두 0으로
+        # -0.01 < x < 0 사이의 버텍스는 모두 0으로 이동
         for vertex in bm.verts:
-            if vertex.co.x > 0 and vertex.co.x < 0.01:
+            if -0.01 < vertex.co.x < 0:
                 vertex.co.x = 0
 
-        # x > 0인 버텍스 모두 선택
-        for vertex in bm.verts:
-            # 버텍스의 좌표를 기반으로 선택 여부 판단
-            if vertex.co.x > 0.0 :
-                vertex.select = True
-            else:
-                vertex.select = False
-
-        # 선택된 버텍스 제거
-        bmesh.ops.delete(
-            bm,
-            geom=[v for v in bm.verts if v.select],
-            context='VERTS'
-        )
+        # 음수 X 영역만 제거하고, 제거할 버텍스가 없어도 미러 추가를 계속 진행
+        vertices_to_delete = [vertex for vertex in bm.verts if vertex.co.x < 0.0]
+        if vertices_to_delete:
+            bmesh.ops.delete(
+                bm,
+                geom=vertices_to_delete,
+                context='VERTS'
+            )
 
         # BMesh 데이터를 오브젝트에 적용
         bmesh.update_edit_mesh(obj.data)
@@ -969,25 +963,19 @@ class Add_Mirror_Y_Modifier(Operator):
         # BMesh 생성
         bm = bmesh.from_edit_mesh(obj.data)
 
-        # 0 < x < 0.01 사이의 vertex는 모두 0으로
+        # -0.01 < y < 0 사이의 버텍스는 모두 0으로 이동
         for vertex in bm.verts:
-            if vertex.co.y > 0 and vertex.co.y < 0.01:
+            if -0.01 < vertex.co.y < 0:
                 vertex.co.y = 0
 
-        # x > 0인 버텍스 모두 선택
-        for vertex in bm.verts:
-            # 버텍스의 좌표를 기반으로 선택 여부 판단
-            if vertex.co.y > 0.0 :
-                vertex.select = True
-            else:
-                vertex.select = False
-
-        # 선택된 버텍스 제거
-        bmesh.ops.delete(
-            bm,
-            geom=[v for v in bm.verts if v.select],
-            context='VERTS'
-        )
+        # 음수 Y 영역만 제거하고, 제거할 버텍스가 없어도 미러 추가를 계속 진행
+        vertices_to_delete = [vertex for vertex in bm.verts if vertex.co.y < 0.0]
+        if vertices_to_delete:
+            bmesh.ops.delete(
+                bm,
+                geom=vertices_to_delete,
+                context='VERTS'
+            )
 
         # BMesh 데이터를 오브젝트에 적용
         bmesh.update_edit_mesh(obj.data)
@@ -1026,25 +1014,19 @@ class Add_Mirror_Z_Modifier(Operator):
         # BMesh 생성
         bm = bmesh.from_edit_mesh(obj.data)
 
-        # 0 < x < 0.01 사이의 vertex는 모두 0으로
+        # -0.01 < z < 0 사이의 버텍스는 모두 0으로 이동
         for vertex in bm.verts:
-            if vertex.co.z > 0 and vertex.co.z < 0.01:
+            if -0.01 < vertex.co.z < 0:
                 vertex.co.z = 0
 
-        # x > 0인 버텍스 모두 선택
-        for vertex in bm.verts:
-            # 버텍스의 좌표를 기반으로 선택 여부 판단
-            if vertex.co.z > 0.0 :
-                vertex.select = True
-            else:
-                vertex.select = False
-
-        # 선택된 버텍스 제거
-        bmesh.ops.delete(
-            bm,
-            geom=[v for v in bm.verts if v.select],
-            context='VERTS'
-        )
+        # 음수 Z 영역만 제거하고, 제거할 버텍스가 없어도 미러 추가를 계속 진행
+        vertices_to_delete = [vertex for vertex in bm.verts if vertex.co.z < 0.0]
+        if vertices_to_delete:
+            bmesh.ops.delete(
+                bm,
+                geom=vertices_to_delete,
+                context='VERTS'
+            )
 
         # BMesh 데이터를 오브젝트에 적용
         bmesh.update_edit_mesh(obj.data)
