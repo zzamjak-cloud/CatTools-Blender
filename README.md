@@ -43,6 +43,36 @@ CatTools는 기존 Woody Tools의 연산자 식별자를 유지하므로 두 애
 
 ### 개발 버전
 
+macOS에서는 전용 `CatToolsBlenderDev/<Blender 버전>` 프로필로 개발 소스를 실행할 수 있습니다. 이 방식은 기본 Blender 프로필과 원격 설치본을 변경하지 않으며, 저장소 루트를 `extensions/user_default/cat_tools`에 심링크한 뒤 `bl_ext.user_default.cat_tools`를 자동으로 활성화합니다.
+
+```bash
+./scripts/dev_run.sh
+```
+
+기본값은 Blender 5.2와 `/Applications/Blender.app/Contents/MacOS/Blender`입니다. 다른 설치본은 환경변수로 지정하고, `--background`를 비롯한 Blender 인자는 명령 뒤에 그대로 전달합니다.
+개발 실행기는 Python 시작 스크립트 오류를 종료 코드 1로 반환하므로 자동 검사에서 예외를 성공으로 오인하지 않습니다.
+
+```bash
+BLENDER_VERSION=5.3 BLENDER_BIN="/Applications/Blender 5.3.app/Contents/MacOS/Blender" ./scripts/dev_run.sh
+./scripts/dev_run.sh --background
+```
+
+격리 프로필과 개발 확장 로드를 Blender에서 직접 확인하려면 다음 검사를 실행합니다.
+
+```bash
+./scripts/dev_run.sh --background --python tests/blender_dev_profile_smoke.py
+```
+
+개발 프로필에 로드된 실제 CatTools로 X/Y/Z Mirror와 등록·해제를 확인하려면 다음 검사를 실행합니다.
+
+```bash
+./scripts/dev_run.sh --background --python tests/blender_mirror_smoke.py
+```
+
+기능 수정 중에는 이 개발 프로필을 사용하며 GitHub 릴리스나 원격 설치본을 매번 갱신할 필요가 없습니다.
+
+배포용 Extension 패키지는 다음 명령으로 생성합니다.
+
 ```bash
 python3 scripts/build_extension.py
 ```

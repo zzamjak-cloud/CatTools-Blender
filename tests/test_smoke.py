@@ -13,6 +13,10 @@ ADDON_PATH = ROOT / "__init__.py"
 MANIFEST_PATH = ROOT / "blender_manifest.toml"
 PAGES_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "pages.yml"
 README_PATH = ROOT / "README.md"
+DEV_RUN_PATH = ROOT / "scripts" / "dev_run.sh"
+DEV_BOOTSTRAP_PATH = ROOT / "scripts" / "dev_bootstrap.py"
+DEV_PROFILE_SMOKE_PATH = ROOT / "tests" / "blender_dev_profile_smoke.py"
+MIRROR_SMOKE_PATH = ROOT / "tests" / "blender_mirror_smoke.py"
 
 EXPECTED_REGISTERED_CLASSES = [
     "OBJECT_PT_WoodyTool",
@@ -214,6 +218,82 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         self.assertIn("Check for Updates on Startup", readme)
         self.assertNotIn("Install from Disk", readme)
+
+    def test_isolated_development_runner(self) -> None:
+        script = DEV_RUN_PATH.read_text(encoding="utf-8")
+        self.assertIn("set -euo pipefail", script)
+        self.assertIn("CatToolsBlenderDev", script)
+        self.assertIn('BLENDER_USER_RESOURCES="$PROFILE"', script)
+        self.assertIn('export BLENDER_VERSION', script)
+        self.assertIn('export CATTOOLS_DEV_PROFILE_BASE="$PROFILE_BASE"', script)
+        self.assertIn('extensions/user_default', script)
+        self.assertIn('ADDON_LINK="$EXTENSION_DIR/cat_tools"', script)
+        self.assertIn('[[ ! -x "$BLENDER_BIN" ]]', script)
+        self.assertIn('ln -sfn "$REPO_ROOT" "$ADDON_LINK"', script)
+        self.assertIn(
+            '--background --python-exit-code 1 --python "$BOOTSTRAP_SCRIPT"',
+            script,
+        )
+        self.assertIn('exec "$BLENDER_BIN" --python-exit-code 1 "$@"', script)
+
+    def test_development_bootstrap_and_runtime_smoke_syntax(self) -> None:
+        bootstrap = DEV_BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        runtime_smoke = DEV_PROFILE_SMOKE_PATH.read_text(encoding="utf-8")
+        bootstrap_tree = ast.parse(bootstrap, filename=str(DEV_BOOTSTRAP_PATH))
+        compile(runtime_smoke, str(DEV_PROFILE_SMOKE_PATH), "exec")
+        self.assertIn('MODULE_NAME = "bl_ext.user_default.cat_tools"', bootstrap)
+        self.assertIn("bpy.ops.preferences.addon_enable", bootstrap)
+        self.assertIn("bpy.ops.wm.save_userpref()", bootstrap)
+
+        main_node = next(
+            node
+            for node in bootstrap_tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "main"
+        )
+        enable_guard = next(
+            node
+            for node in main_node.body
+            if isinstance(node, ast.If)
+            and any(
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and child.func.attr == "addon_enable"
+                for child in ast.walk(node)
+            )
+        )
+        save_calls = [
+            child
+            for child in ast.walk(main_node)
+            if isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Attribute)
+            and child.func.attr == "save_userpref"
+        ]
+        self.assertEqual(len(save_calls), 1)
+        self.assertIn(save_calls[0], list(ast.walk(enable_guard)))
+
+        self.assertIn("BLENDER_USER_RESOURCES", runtime_smoke)
+        self.assertIn("addon_link.is_symlink()", runtime_smoke)
+        self.assertIn("profile != default_profile", runtime_smoke)
+        self.assertIn('"woody" in module_name.lower()', runtime_smoke)
+
+    def test_mirror_smoke_uses_enabled_development_extension(self) -> None:
+        source = MIRROR_SMOKE_PATH.read_text(encoding="utf-8")
+        compile(source, str(MIRROR_SMOKE_PATH), "exec")
+        self.assertIn("importlib.import_module(MODULE_NAME)", source)
+        self.assertIn("registered_here", source)
+        self.assertIn("bpy.ops.preferences.addon_disable", source)
+        self.assertIn("bpy.ops.preferences.addon_enable", source)
+
+    def test_isolated_development_guide(self) -> None:
+        readme = README_PATH.read_text(encoding="utf-8")
+        self.assertIn("CatToolsBlenderDev/<Blender 버전>", readme)
+        self.assertIn("./scripts/dev_run.sh", readme)
+        self.assertIn("BLENDER_VERSION=5.3", readme)
+        self.assertIn("BLENDER_BIN=", readme)
+        self.assertIn(
+            "--background --python tests/blender_dev_profile_smoke.py",
+            readme,
+        )
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import bpy
 
 ROOT = Path(__file__).resolve().parents[1]
 ADDON_PATH = ROOT / "__init__.py"
+MODULE_NAME = "bl_ext.user_default.cat_tools"
 AXES = {
     "x": 0,
     "y": 1,
@@ -18,12 +20,43 @@ AXES = {
 
 
 def load_addon():
+    if MODULE_NAME in bpy.context.preferences.addons:
+        return importlib.import_module(MODULE_NAME), False
+
     spec = importlib.util.spec_from_file_location("cat_tools_blender_smoke", ADDON_PATH)
     if spec is None or spec.loader is None:
         raise AssertionError("CatTools 모듈 로더를 생성할 수 없습니다.")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module
+    return module, True
+
+
+def verify_development_addon_toggle(addon) -> None:
+    disable_result = bpy.ops.preferences.addon_disable(module=MODULE_NAME)
+    if disable_result != {"FINISHED"}:
+        raise AssertionError(f"개발 확장 비활성화에 실패했습니다: {disable_result}")
+
+    try:
+        assert MODULE_NAME not in bpy.context.preferences.addons, (
+            f"개발 확장이 비활성화되지 않았습니다: {MODULE_NAME}"
+        )
+        try:
+            bpy.ops.wm.add_mirror_x_modifier.poll()
+        except AttributeError:
+            pass
+        else:
+            raise AssertionError(
+                "개발 확장 비활성화 후 Mirror 연산자가 호출 가능한 상태입니다."
+            )
+    finally:
+        enable_result = bpy.ops.preferences.addon_enable(module=MODULE_NAME)
+        if enable_result != {"FINISHED"}:
+            raise AssertionError(f"개발 확장 재활성화에 실패했습니다: {enable_result}")
+
+    assert MODULE_NAME in bpy.context.preferences.addons, (
+        f"개발 확장이 재활성화되지 않았습니다: {MODULE_NAME}"
+    )
+    bpy.ops.wm.add_mirror_x_modifier.poll()
 
 
 def remove_all_objects() -> None:
@@ -81,9 +114,10 @@ def remove_object(obj) -> None:
 
 
 def main() -> None:
-    addon = load_addon()
+    addon, registered_here = load_addon()
     remove_all_objects()
-    addon.register()
+    if registered_here:
+        addon.register()
     try:
         for axis in AXES:
             mixed_values, mixed_obj = run_operator(axis, [-1.0, -0.005, 0.005, 1.0])
@@ -97,9 +131,13 @@ def main() -> None:
                 f"{axis.upper()} 보존 좌표가 변경되었습니다: {preserved_values}"
             )
             remove_object(preserved_obj)
+
+        if not registered_here:
+            verify_development_addon_toggle(addon)
     finally:
         remove_all_objects()
-        addon.unregister()
+        if registered_here:
+            addon.unregister()
 
     print("CatTools X/Y/Z Mirror Blender 스모크 테스트 통과")
 
