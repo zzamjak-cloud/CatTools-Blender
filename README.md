@@ -5,7 +5,7 @@ CatTools는 CAT 블록 모델링 작업에 사용해 온 **Woody Tools**의 최�
 ## 요구 사항
 
 - Blender 4.2 이상
-- CatTools 1.0.1
+- CatTools 1.0.2
 
 ## 제공 기능
 
@@ -104,7 +104,7 @@ PowerShell에서는 다음 명령으로 GUI 개발 환경을 실행합니다. �
 python3 scripts/build_extension.py
 ```
 
-생성된 `dist/cat_tools-v1.0.1.zip`은 릴리스와 원격 저장소 생성에 사용하는 개발용 패키지입니다.
+생성된 `dist/cat_tools-v1.0.2.zip`은 릴리스와 원격 저장소 생성에 사용하는 개발용 패키지입니다.
 
 ## 검사
 
