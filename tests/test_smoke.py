@@ -230,7 +230,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertIn("Check for Updates on Startup", readme)
         self.assertNotIn("Install from Disk", readme)
 
-    def test_repository_index_versions_are_sorted_ascending(self) -> None:
+    def test_repository_index_keeps_only_latest_version_per_addon(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "sort_repository_index",
             SORT_REPOSITORY_INDEX_PATH,
@@ -251,6 +251,8 @@ class CatToolsSmokeTest(unittest.TestCase):
                             {"id": "cat_tools", "version": "1.0.0"},
                             {"id": "cat_tools", "version": "1.0.10"},
                             {"id": "cat_tools", "version": "1.0.1"},
+                            {"id": "another_tool", "version": "2.0.0"},
+                            {"id": "another_tool", "version": "1.0.0"},
                         ],
                     },
                     ensure_ascii=False,
@@ -259,11 +261,11 @@ class CatToolsSmokeTest(unittest.TestCase):
             )
 
             module.sort_index(index_path)
-            versions = [
-                item["version"]
+            entries = {
+                item["id"]: item["version"]
                 for item in json.loads(index_path.read_text(encoding="utf-8"))["data"]
-            ]
-        self.assertEqual(versions, ["1.0.0", "1.0.1", "1.0.2", "1.0.10"])
+            }
+        self.assertEqual(entries, {"another_tool": "2.0.0", "cat_tools": "1.0.10"})
 
     def test_isolated_development_runner(self) -> None:
         script = DEV_RUN_PATH.read_text(encoding="utf-8")

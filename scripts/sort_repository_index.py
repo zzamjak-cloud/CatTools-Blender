@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Blender Extension 저장소 인덱스를 업데이트 판정에 맞게 정렬합니다."""
+"""Blender Extension 저장소 인덱스에서 애드온별 최신 버전만 남깁니다."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ VERSION_PART_RE = re.compile(r"(\d+|[A-Za-z]+)")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Extension 저장소 index.json 정렬")
+    parser = argparse.ArgumentParser(description="Extension 저장소 index.json 정규화")
     parser.add_argument("index_path", type=Path, help="정렬할 index.json 경로")
     return parser.parse_args()
 
@@ -30,10 +30,16 @@ def version_key(version: str) -> tuple[tuple[int, int | str], ...]:
 
 def sort_index(index_path: Path) -> None:
     data = json.loads(index_path.read_text(encoding="utf-8"))
-    data["data"] = sorted(
-        data.get("data", []),
-        key=lambda item: (item.get("id", ""), version_key(item.get("version", "0"))),
-    )
+    latest_by_id: dict[str, dict] = {}
+    for item in data.get("data", []):
+        addon_id = item.get("id", "")
+        current = latest_by_id.get(addon_id)
+        if current is None or version_key(item.get("version", "0")) > version_key(
+            current.get("version", "0")
+        ):
+            latest_by_id[addon_id] = item
+
+    data["data"] = [latest_by_id[addon_id] for addon_id in sorted(latest_by_id)]
     index_path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
