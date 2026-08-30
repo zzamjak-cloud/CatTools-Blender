@@ -126,7 +126,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         }
         self.assertEqual(actual, EXPECTED_IDNAMES)
 
-    def test_mirror_operators_preserve_positive_side(self) -> None:
+    def test_mirror_operators_preserve_expected_side(self) -> None:
         for class_name, axis in MIRROR_AXES.items():
             with self.subTest(axis=axis):
                 operator = self.classes[class_name]
@@ -140,14 +140,12 @@ class CatToolsSmokeTest(unittest.TestCase):
                     for node in ast.walk(execute)
                     if isinstance(node, ast.Compare)
                 }
-                self.assertIn(
-                    f"-0.01 < vertex.co.{axis} < 0",
-                    comparisons,
-                )
-                self.assertIn(
-                    f"vertex.co.{axis} < 0.0",
-                    comparisons,
-                )
+                if class_name == "Add_Mirror_X_Modifier":
+                    self.assertIn("0 < vertex.co.x < 0.01", comparisons)
+                    self.assertIn("vertex.co.x > 0.0", comparisons)
+                else:
+                    self.assertIn(f"-0.01 < vertex.co.{axis} < 0", comparisons)
+                    self.assertIn(f"vertex.co.{axis} < 0.0", comparisons)
 
     def test_mirror_delete_is_guarded_when_side_is_empty(self) -> None:
         for class_name in MIRROR_AXES:

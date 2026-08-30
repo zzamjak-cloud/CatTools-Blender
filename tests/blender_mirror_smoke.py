@@ -121,13 +121,16 @@ def main() -> None:
     try:
         for axis in AXES:
             mixed_values, mixed_obj = run_operator(axis, [-1.0, -0.005, 0.005, 1.0])
-            assert mixed_values == [0.0, 0.005, 1.0], (
+            expected_mixed_values = [-1.0, -0.005, 0.0] if axis == "x" else [0.0, 0.005, 1.0]
+            assert mixed_values == expected_mixed_values, (
                 f"{axis.upper()} 혼합 좌표 결과가 다릅니다: {mixed_values}"
             )
             remove_object(mixed_obj)
 
-            preserved_values, preserved_obj = run_operator(axis, [0.0, 0.005, 1.0])
-            assert preserved_values == [0.0, 0.005, 1.0], (
+            preserved_input = [0.0, -0.005, -1.0] if axis == "x" else [0.0, 0.005, 1.0]
+            preserved_values, preserved_obj = run_operator(axis, preserved_input)
+            expected_preserved_values = [-1.0, -0.005, 0.0] if axis == "x" else [0.0, 0.005, 1.0]
+            assert preserved_values == expected_preserved_values, (
                 f"{axis.upper()} 보존 좌표가 변경되었습니다: {preserved_values}"
             )
             remove_object(preserved_obj)

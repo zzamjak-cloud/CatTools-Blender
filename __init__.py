@@ -912,13 +912,13 @@ class Add_Mirror_X_Modifier(Operator):
         # BMesh 생성
         bm = bmesh.from_edit_mesh(obj.data)
 
-        # -0.01 < x < 0 사이의 버텍스는 모두 0으로 이동
+        # 0 < x < 0.01 사이의 버텍스는 모두 0으로 이동
         for vertex in bm.verts:
-            if -0.01 < vertex.co.x < 0:
+            if 0 < vertex.co.x < 0.01:
                 vertex.co.x = 0
 
-        # 음수 X 영역만 제거하고, 제거할 버텍스가 없어도 미러 추가를 계속 진행
-        vertices_to_delete = [vertex for vertex in bm.verts if vertex.co.x < 0.0]
+        # 양수 X 영역만 제거하고, 제거할 버텍스가 없어도 미러 추가를 계속 진행
+        vertices_to_delete = [vertex for vertex in bm.verts if vertex.co.x > 0.0]
         if vertices_to_delete:
             bmesh.ops.delete(
                 bm,
