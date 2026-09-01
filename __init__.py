@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 0, 3),
+    "version": (1, 1, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -15,7 +15,54 @@ bl_info = {
 import bpy, math, bmesh
 from typing import Set
 from bpy.types import Context, Panel, Operator
-from bpy.props import StringProperty, FloatProperty, BoolProperty, IntProperty
+from bpy.props import StringProperty, FloatProperty, BoolProperty, IntProperty, EnumProperty
+from mathutils import Euler, Quaternion
+
+# Transform / Align 행의 (기본 라벨, 축약 라벨, 대상) — 3x3 축약 그리드
+TRANSFORM_ROWS = (
+    ("Loc", "L", "location"),
+    ("Rot", "R", "rotation_euler"),
+    ("Sca", "S", "scale"),
+)
+ALIGN_ROWS = (
+    ("Loc", "L", 'LOCATION'),
+    ("Rot", "R", 'ROTATION'),
+    ("Sca", "S", 'SCALE'),
+)
+ALIGN_BUTTONS = (
+    ('X', "X"),
+    ('Y', "Y"),
+    ('Z', "Z"),
+    ('ALL', "All"),
+)
+# 행 라벨 칸의 고정 폭(UI 단위). 비율 분할과 달리 사이드바 폭이 변해도 여백이
+# 늘어나지 않고, 라벨이 잘리지 않는 최소값으로 맞춘다.
+TRANSFORM_LABEL_UNITS = 1.5
+TRANSFORM_COMPACT_LABEL_UNITS = 0.8
+# 사이드바 논리 폭이 이 값 미만이면 라벨을 한 글자로 축약한다.
+# 기본 사이드바 폭은 약 280 논리 픽셀이므로 기본 상태에서는 축약되지 않는다.
+TRANSFORM_COMPACT_WIDTH = 200
+
+CATOON_BASE_IMAGE_NAME = "CatoonBaseColor"
+
+# Catoon 셀셰이딩 노드 그룹의 (소켓명, 타입, 기본값).
+# Light Color를 흰색으로 두어 밝은 면은 텍스처 색이 그대로 살아나고,
+# 그림자 면은 Shadow Color를 곱해 만화적인 2톤이 된다.
+CATOON_SOCKETS = (
+    ("Base Color", 'NodeSocketColor', (1.0, 1.0, 1.0, 1.0)),
+    ("Alpha", 'NodeSocketFloat', 1.0),
+    ("Light Color", 'NodeSocketColor', (1.0, 1.0, 1.0, 1.0)),
+    ("Shadow Color", 'NodeSocketColor', (0.45, 0.5, 0.62, 1.0)),
+    ("Threshold", 'NodeSocketFloat', 0.5),
+    ("Softness", 'NodeSocketFloat', 0.0),
+)
+
+ALIGN_AXIS_INDICES = {'X': 0, 'Y': 1, 'Z': 2}
+ALIGN_PROPERTIES = {
+    'LOCATION': "location",
+    'ROTATION': "rotation_euler",
+    'SCALE': "scale",
+}
 
 # 머티리얼 체크 & 생성 & 리턴 (중복 방지)
 def check_material_exist(material_name):
@@ -38,6 +85,58 @@ def check_mesh_exist(mesh_name):
         bpy.data.meshes.remove(mesh)
 
 
+# 이미지를 지정하지 않은 Image Texture 노드는 검은색으로 평가된다. 그 값이 텍스처
+# 색으로 곱해지면 머티리얼 전체가 검게 나오므로, 흰색 기본 이미지를 넣어 텍스처를
+# 지정하기 전에도 2톤 음영이 보이게 한다.
+def catoon_base_image():
+    image = bpy.data.images.get(CATOON_BASE_IMAGE_NAME)
+    if image is None or image.source != 'GENERATED':
+        image = bpy.data.images.new(CATOON_BASE_IMAGE_NAME, width=4, height=4)
+    image.generated_color = (1.0, 1.0, 1.0, 1.0)
+    return image
+
+
+# ShaderNodeMix/MapRange는 data_type마다 같은 이름의 소켓을 중복으로 들고 있어
+# 이름이나 인덱스로 찾으면 비활성 소켓이 잡힌다. 활성 소켓만 골라 쓴다.
+def enabled_socket(sockets, name):
+    for socket in sockets:
+        if socket.name == name and socket.enabled:
+            return socket
+    raise KeyError(f"활성 소켓을 찾을 수 없습니다: {name}")
+
+
+# 사이드바가 좁아지면 라벨을 한 글자로 줄이고 라벨 칸 폭도 함께 좁힌다.
+def transform_label_metrics(context) -> tuple[bool, float]:
+    region = context.region
+    ui_scale = context.preferences.system.ui_scale or 1.0
+    if region is None:
+        return False, TRANSFORM_LABEL_UNITS
+    if region.width / ui_scale < TRANSFORM_COMPACT_WIDTH:
+        return True, TRANSFORM_COMPACT_LABEL_UNITS
+    return False, TRANSFORM_LABEL_UNITS
+
+
+# rotation_mode가 오일러가 아니어도 정렬이 조용히 무시되지 않도록 오일러로 환산
+def rotation_as_euler(obj) -> Euler:
+    if obj.rotation_mode == 'QUATERNION':
+        return obj.rotation_quaternion.to_euler('XYZ')
+    if obj.rotation_mode == 'AXIS_ANGLE':
+        angle, x, y, z = obj.rotation_axis_angle
+        return Quaternion((x, y, z), angle).to_euler('XYZ')
+    return obj.rotation_euler.copy()
+
+
+# rotation_as_euler로 얻어 수정한 오일러 값을 원래 rotation_mode로 되돌려 적용
+def apply_rotation_euler(obj, euler: Euler) -> None:
+    if obj.rotation_mode == 'QUATERNION':
+        obj.rotation_quaternion = euler.to_quaternion()
+    elif obj.rotation_mode == 'AXIS_ANGLE':
+        axis, angle = euler.to_quaternion().to_axis_angle()
+        obj.rotation_axis_angle = (angle, axis.x, axis.y, axis.z)
+    else:
+        obj.rotation_euler = euler
+
+
 # 메인 패널: 사이드바 메뉴 UI 설정
 class OBJECT_PT_WoodyTool(Panel):
     bl_label = "CatTools"
@@ -50,15 +149,44 @@ class OBJECT_PT_WoodyTool(Panel):
         layout = self.layout
 
     # 변환
-        # selected_object = bpy.context.object
+        selected_object = context.object
 
-        # 선택한 오브젝트의 Properties 사용
-        # layout.label(text="Transform :", icon="OUTLINER_DATA_EMPTY")
-        # layout.prop(selected_object, "location", text="")
-        # layout.prop(selected_object, "rotation_euler", text="")
-        # layout.prop(selected_object, "scale", text="")
+        compact, label_units = transform_label_metrics(context)
 
-        # layout.separator(factor=1)
+        # Transform 축약 필드: 행 라벨 + 한 줄 3열로 공간을 최소화
+        layout.label(text="Transform :", icon="OUTLINER_DATA_EMPTY")
+        if selected_object:
+            column = layout.column(align=True)
+            for full_label, short_label, property_name in TRANSFORM_ROWS:
+                row = column.row(align=True)
+                label_column = row.column(align=True)
+                label_column.ui_units_x = label_units
+                label_column.label(text=short_label if compact else full_label)
+                fields = row.row(align=True)
+                for index in range(3):
+                    fields.prop(selected_object, property_name, index=index, text="")
+        else:
+            layout.label(text="오브젝트를 선택하세요.")
+
+        layout.separator(factor=1)
+
+    # 정렬: 활성 오브젝트를 기준으로 선택 오브젝트를 맞춤
+        layout.label(text="Align :", icon="SNAP_ON")
+        column = layout.column(align=True)
+        for full_label, short_label, align_mode in ALIGN_ROWS:
+            row = column.row(align=True)
+            label_column = row.column(align=True)
+            label_column.ui_units_x = label_units
+            label_column.label(text=short_label if compact else full_label)
+            buttons = row.row(align=True)
+            for axis, axis_label in ALIGN_BUTTONS:
+                operator = buttons.operator(
+                    OBJECT_OT_CatAlign.bl_idname, text=axis_label
+                )
+                operator.mode = align_mode
+                operator.axis = axis
+
+        layout.separator(factor=1)
 
     # 실린더
         # layout.label(text="Cyliner :", icon='MESH_CYLINDER')
@@ -79,6 +207,7 @@ class OBJECT_PT_WoodyTool(Panel):
         row = layout.row()
         row.operator(Add_Material.bl_idname, text= Add_Material.bl_label)
         row.operator(SHADER_OP_TwoSideTex.bl_idname, text= SHADER_OP_TwoSideTex.bl_label)
+        row.operator(SHADER_OP_Catoon.bl_idname, text= SHADER_OP_Catoon.bl_label)
 
         # row = layout.row()
         # row.operator(SHADER_OP_Blend2Tex.bl_idname, text= SHADER_OP_Blend2Tex.bl_label)
@@ -738,6 +867,176 @@ class SHADER_OP_TwoSideTex(Operator):
         return {'FINISHED'}
 
 
+class SHADER_OP_Catoon(Operator):
+    """텍스처 색을 그대로 살리면서 2톤 만화풍 그림자를 만드는 셀셰이딩 머티리얼"""
+    bl_label = "Catoon"
+    bl_idname = 'shader.catoon_operator'
+
+    def execute(self, context):
+
+        # 선택한 오브젝트의 머티리얼 슬롯을 모두 제거
+        obj = bpy.context.object
+        obj.data.materials.clear()
+
+        # 머티리얼 노드 트리 기본
+        material = check_material_exist(obj.name)
+        material.blend_method = 'CLIP'
+        node_tree = material.node_tree
+        nodes = node_tree.nodes
+        nodes.remove(nodes.get('Principled BSDF'))
+
+# 외부 노드 목록
+
+        # 머티리얼 출력 노드
+        material_output = nodes.get('Material Output')
+        material_output.location = (150, 0)
+
+        # 이미지 텍스처 노드 (사용자가 카툰 텍스처를 지정, 기본은 흰색)
+        node_TexImage = nodes.new(type='ShaderNodeTexImage')
+        node_TexImage.location = (-700, 100)
+        node_TexImage.image = catoon_base_image()
+
+# 노드 그룹 관련 ========================================
+
+        catoon_group = bpy.data.node_groups.get("CatoonGroup")
+
+        # 노드 그룹 데이터 블록이 존재한다면 제거합니다.
+        if catoon_group is not None:
+            bpy.data.node_groups.remove(catoon_group)
+
+        # 'CatoonGroup' 노드 그룹 데이터 블록 생성
+        bpy.data.node_groups.new('CatoonGroup', 'ShaderNodeTree')
+        node_group = nodes.new(type='ShaderNodeGroup')
+        node_group.node_tree = bpy.data.node_groups['CatoonGroup']
+        node_group.location = (-200, 0)
+        group = node_group.node_tree
+
+# 노드 그룹 내부 노드 목록 ===================================
+
+        # Group Input 노드
+        group_in = group.nodes.new(type='NodeGroupInput')
+        group_in.location = (-900, 0)
+
+        # Group Output 노드
+        group_out = group.nodes.new(type='NodeGroupOutput')
+        group_out.location = (900, 0)
+
+    # Group Input / Output 소켓 추가 ===================================
+        for socket_name, socket_type, default_value in CATOON_SOCKETS:
+            interface_socket = group.interface.new_socket(
+                name=socket_name, in_out='INPUT', socket_type=socket_type
+            )
+            interface_socket.default_value = default_value
+            if socket_type == 'NodeSocketFloat':
+                interface_socket.min_value = 0.0
+                interface_socket.max_value = 1.0
+        group.interface.new_socket(name="Shader", in_out='OUTPUT', socket_type='NodeSocketShader')
+
+        # 노드 그룹 인스턴스는 소켓이 추가되기 전에 만들어져 인터페이스 기본값을
+        # 물려받지 못한다. 인스턴스 소켓에 기본값을 직접 넣어야 검은색으로 시작하지 않는다.
+        for socket_name, _socket_type, default_value in CATOON_SOCKETS:
+            node_group.inputs[socket_name].default_value = default_value
+
+        # Diffuse BSDF 노드: 순수한 램버트 음영만 뽑기 위해 흰색으로 고정
+        node_Diffuse = group.nodes.new(type='ShaderNodeBsdfDiffuse')
+        node_Diffuse.location = (-700, -250)
+        node_Diffuse.inputs['Color'].default_value = (1.0, 1.0, 1.0, 1.0)
+
+        # Shader to RGB 노드: 조명 결과를 색으로 변환 (EEVEE 전용)
+        node_ShaderToRGB = group.nodes.new(type='ShaderNodeShaderToRGB')
+        node_ShaderToRGB.location = (-500, -250)
+
+        # RGB to BW 노드: 조명 밝기를 하나의 값으로
+        node_RGBToBW = group.nodes.new(type='ShaderNodeRGBToBW')
+        node_RGBToBW.location = (-320, -250)
+
+        # Softness가 0이어도 Map Range 구간이 0이 되지 않도록 최소값을 보장
+        node_SoftClamp = group.nodes.new(type='ShaderNodeMath')
+        node_SoftClamp.location = (-600, 200)
+        node_SoftClamp.operation = 'MAXIMUM'
+        node_SoftClamp.inputs[1].default_value = 0.001
+
+        # 경계 하한 = Threshold - Softness
+        node_EdgeMin = group.nodes.new(type='ShaderNodeMath')
+        node_EdgeMin.location = (-400, 300)
+        node_EdgeMin.operation = 'SUBTRACT'
+
+        # 경계 상한 = Threshold + Softness
+        node_EdgeMax = group.nodes.new(type='ShaderNodeMath')
+        node_EdgeMax.location = (-400, 120)
+        node_EdgeMax.operation = 'ADD'
+
+        # Map Range 노드: 밝기를 경계 구간에서 0/1로 잘라 2톤을 만든다.
+        node_MapRange = group.nodes.new(type='ShaderNodeMapRange')
+        node_MapRange.location = (-120, -100)
+        node_MapRange.interpolation_type = 'SMOOTHSTEP'
+        node_MapRange.clamp = True
+
+        # Mix Color 노드: 그림자 톤과 밝은 톤 중 하나를 고른다.
+        node_MixTone = group.nodes.new(type='ShaderNodeMix')
+        node_MixTone.location = (150, 100)
+        node_MixTone.data_type = 'RGBA'
+        node_MixTone.blend_type = 'MIX'
+
+        # Mix Color 노드: 텍스처 색에 톤을 곱해 색감을 유지한다.
+        node_MixBase = group.nodes.new(type='ShaderNodeMix')
+        node_MixBase.location = (370, 200)
+        node_MixBase.data_type = 'RGBA'
+        node_MixBase.blend_type = 'MULTIPLY'
+        enabled_socket(node_MixBase.inputs, 'Factor').default_value = 1.0
+
+        # Emission 노드: 추가 음영 없이 계산된 2톤을 그대로 출력
+        node_Emission = group.nodes.new(type='ShaderNodeEmission')
+        node_Emission.location = (580, 200)
+
+        # Transparent BSDF 노드: 텍스처 알파 컷아웃 처리용
+        node_Transparent = group.nodes.new(type='ShaderNodeBsdfTransparent')
+        node_Transparent.location = (580, -100)
+
+        # 알파로 Emission과 Transparent를 섞는다.
+        node_MixShader = group.nodes.new(type='ShaderNodeMixShader')
+        node_MixShader.location = (750, 0)
+
+    # 노드 링크 ===============================================================================
+        # 경계 구간 계산
+        group.links.new(group_in.outputs['Softness'], node_SoftClamp.inputs[0])
+        group.links.new(group_in.outputs['Threshold'], node_EdgeMin.inputs[0])
+        group.links.new(node_SoftClamp.outputs['Value'], node_EdgeMin.inputs[1])
+        group.links.new(group_in.outputs['Threshold'], node_EdgeMax.inputs[0])
+        group.links.new(node_SoftClamp.outputs['Value'], node_EdgeMax.inputs[1])
+
+        # 조명 밝기를 2톤으로 자르기
+        group.links.new(node_Diffuse.outputs['BSDF'], node_ShaderToRGB.inputs['Shader'])
+        group.links.new(node_ShaderToRGB.outputs['Color'], node_RGBToBW.inputs['Color'])
+        group.links.new(node_RGBToBW.outputs['Val'], enabled_socket(node_MapRange.inputs, 'Value'))
+        group.links.new(node_EdgeMin.outputs['Value'], enabled_socket(node_MapRange.inputs, 'From Min'))
+        group.links.new(node_EdgeMax.outputs['Value'], enabled_socket(node_MapRange.inputs, 'From Max'))
+
+        # 그림자 톤 / 밝은 톤 선택 후 텍스처 색과 곱하기
+        group.links.new(enabled_socket(node_MapRange.outputs, 'Result'), enabled_socket(node_MixTone.inputs, 'Factor'))
+        group.links.new(group_in.outputs['Shadow Color'], enabled_socket(node_MixTone.inputs, 'A'))
+        group.links.new(group_in.outputs['Light Color'], enabled_socket(node_MixTone.inputs, 'B'))
+        group.links.new(group_in.outputs['Base Color'], enabled_socket(node_MixBase.inputs, 'A'))
+        group.links.new(enabled_socket(node_MixTone.outputs, 'Result'), enabled_socket(node_MixBase.inputs, 'B'))
+
+        # 출력
+        group.links.new(enabled_socket(node_MixBase.outputs, 'Result'), node_Emission.inputs['Color'])
+        group.links.new(group_in.outputs['Alpha'], node_MixShader.inputs['Factor'])
+        group.links.new(node_Transparent.outputs['BSDF'], node_MixShader.inputs[1])
+        group.links.new(node_Emission.outputs['Emission'], node_MixShader.inputs[2])
+        group.links.new(node_MixShader.outputs['Shader'], group_out.inputs[0])
+
+        # 머티리얼 출력 노드에 Node Group 적용
+        node_tree.links.new(node_TexImage.outputs['Color'], node_group.inputs['Base Color'])
+        node_tree.links.new(node_TexImage.outputs['Alpha'], node_group.inputs['Alpha'])
+        node_tree.links.new(node_group.outputs[0], material_output.inputs[0])
+
+        # 머티리얼 할당
+        obj.data.materials.append(material)
+
+        return {'FINISHED'}
+
+
 class PALETTE_OP_RGB(Operator):
     bl_label = "RGB palette"
     bl_idname = 'palette.rgb_operator'
@@ -1050,8 +1349,68 @@ class Add_Mirror_Z_Modifier(Operator):
         return {'FINISHED'}
 
 
+# 정렬 연산자 -----------------------------------------------------------------------------
+
+class OBJECT_OT_CatAlign(Operator):
+    """활성 오브젝트를 기준으로 선택한 오브젝트의 Transform을 축별로 정렬합니다."""
+    bl_idname = "object.cat_align"
+    bl_label = "Align"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    mode: EnumProperty(
+        name="Mode",
+        items=[
+            ('LOCATION', "Location", "위치 정렬"),
+            ('ROTATION', "Rotation", "회전 정렬"),
+            ('SCALE', "Scale", "크기 정렬"),
+        ],
+        default='LOCATION',
+    )
+    axis: EnumProperty(
+        name="Axis",
+        items=[
+            ('X', "X", "X축만 정렬"),
+            ('Y', "Y", "Y축만 정렬"),
+            ('Z', "Z", "Z축만 정렬"),
+            ('ALL', "All", "X/Y/Z 모두 정렬"),
+        ],
+        default='X',
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None and len(context.selected_objects) > 1
+
+    def execute(self, context) -> Set[str]:
+        active_object = context.active_object
+        targets = [obj for obj in context.selected_objects if obj is not active_object]
+        if not targets:
+            self.report({'WARNING'}, "활성 오브젝트와 정렬할 오브젝트를 함께 선택하세요.")
+            return {'CANCELLED'}
+
+        indices = (0, 1, 2) if self.axis == 'ALL' else (ALIGN_AXIS_INDICES[self.axis],)
+
+        if self.mode == 'ROTATION':
+            reference = rotation_as_euler(active_object)
+            for obj in targets:
+                euler = rotation_as_euler(obj)
+                for index in indices:
+                    euler[index] = reference[index]
+                apply_rotation_euler(obj, euler)
+        else:
+            property_name = ALIGN_PROPERTIES[self.mode]
+            reference = getattr(active_object, property_name)
+            for obj in targets:
+                values = getattr(obj, property_name)
+                for index in indices:
+                    values[index] = reference[index]
+
+        return {'FINISHED'}
+
+
 classes = [
     OBJECT_PT_WoodyTool,
+    OBJECT_OT_CatAlign,
     # OBJECT_PT_Spacing,
     # OBJECT_PT_Mirror_Modifier,
     # Add_Cylinder_6,
@@ -1064,6 +1423,7 @@ classes = [
     SHADER_OP_Blend3Tex,
     SHADER_OP_Blend4Tex,
     SHADER_OP_TwoSideTex,
+    SHADER_OP_Catoon,
     # PALETTE_OP_RGB,
     Add_Lattice,
     Add_Mirror_X_Modifier,

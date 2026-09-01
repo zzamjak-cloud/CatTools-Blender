@@ -9,8 +9,11 @@ CatTools는 CAT 블록 모델링 작업에 사용해 온 **Woody Tools**의 최�
 
 ## 제공 기능
 
+- Transform 축약 필드: Loc·Rot·Sca를 각각 한 줄 3열 그리드로 표시하며, 사이드바가 좁아지면 라벨을 L·R·S로 축약
+- Align 축약 버튼: 활성 오브젝트를 기준으로 선택 오브젝트의 Loc·Rot·Sca를 X·Y·Z·All 축별 정렬
 - 기본 머티리얼 생성
 - 양면 텍스처 및 2·3·4 텍스처 셰이더 구성
+- Catoon 셀셰이딩 머티리얼: 텍스처 색감을 유지한 2톤 만화풍 그림자 (Shadow Color·Threshold·Softness 조절, Shader to RGB 기반이라 EEVEE 전용). Image Texture 노드에 흰색 기본 이미지가 들어가 있으므로, 여기에 사용할 텍스처를 지정한다.
 - 선택 오브젝트의 원형 배열
 - 래티스 생성 및 연결
 - X축은 왼쪽 영역을 보존하고 오른쪽 영역을 정리한 뒤 미러 모디파이어 추가
@@ -70,6 +73,18 @@ BLENDER_VERSION=5.3 BLENDER_BIN="/Applications/Blender 5.3.app/Contents/MacOS/Bl
 
 ```bash
 ./scripts/dev_run.sh --background --python tests/blender_mirror_smoke.py
+```
+
+Align 연산자의 축별 정렬과 비오일러 rotation_mode 처리를 확인하려면 다음 검사를 실행합니다.
+
+```bash
+./scripts/dev_run.sh --background --python tests/blender_align_smoke.py
+```
+
+Catoon 셀셰이딩이 실제로 2톤으로 렌더링되는지 확인하려면 다음 검사를 실행합니다.
+
+```bash
+./scripts/dev_run.sh --background --python tests/blender_catoon_smoke.py
 ```
 
 기능 수정 중에는 이 개발 프로필을 사용하며 GitHub 릴리스나 원격 설치본을 매번 갱신할 필요가 없습니다.
