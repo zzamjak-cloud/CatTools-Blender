@@ -25,9 +25,11 @@ DEV_PROFILE_SMOKE_PATH = ROOT / "tests" / "blender_dev_profile_smoke.py"
 MIRROR_SMOKE_PATH = ROOT / "tests" / "blender_mirror_smoke.py"
 ALIGN_SMOKE_PATH = ROOT / "tests" / "blender_align_smoke.py"
 CATOON_SMOKE_PATH = ROOT / "tests" / "blender_catoon_smoke.py"
+SIDEBAR_SMOKE_PATH = ROOT / "tests" / "blender_sidebar_smoke.py"
 
 EXPECTED_REGISTERED_CLASSES = [
     "OBJECT_PT_WoodyTool",
+    "VIEW3D_OT_CatSidebar",
     "OBJECT_OT_CatAlign",
     "CircleArray",
     "Add_Material",
@@ -47,6 +49,7 @@ EXPECTED_IDNAMES = {
     "OBJECT_PT_Spacing": "OBJECT_PT_spacing",
     "OBJECT_PT_Mirror_Modifier": "OBJECT_PT_Mirror_Modifier",
     "OBJECT_OT_CatAlign": "object.cat_align",
+    "VIEW3D_OT_CatSidebar": "view3d.cat_toggle_sidebar",
     "Add_Cylinder_6": "wm.add_cylinder_6",
     "Add_Cylinder_8": "wm.add_cylinder_8",
     "Add_Cylinder_10": "wm.add_cylinder_10",
@@ -82,6 +85,26 @@ def assignment_value(node: ast.ClassDef, name: str):
     raise AssertionError(f"{node.name}.{name}을 찾을 수 없습니다.")
 
 
+def assignment_name(node: ast.ClassDef, name: str) -> str:
+    for statement in node.body:
+        if not isinstance(statement, ast.Assign):
+            continue
+        if any(isinstance(target, ast.Name) and target.id == name for target in statement.targets):
+            if not isinstance(statement.value, ast.Name):
+                raise AssertionError(f"{node.name}.{name}이 이름 참조가 아닙니다.")
+            return statement.value.id
+    raise AssertionError(f"{node.name}.{name}을 찾을 수 없습니다.")
+
+
+def module_constant(tree: ast.Module, name: str):
+    for statement in tree.body:
+        if not isinstance(statement, ast.Assign):
+            continue
+        if any(isinstance(target, ast.Name) and target.id == name for target in statement.targets):
+            return ast.literal_eval(statement.value)
+    raise AssertionError(f"모듈 상수 {name}을 찾을 수 없습니다.")
+
+
 class CatToolsSmokeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -99,7 +122,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], "1.0.0")
         self.assertEqual(manifest["id"], "cat_tools")
         self.assertEqual(manifest["name"], "CatTools")
-        self.assertEqual(manifest["version"], "1.1.0")
+        self.assertEqual(manifest["version"], "1.2.0")
         self.assertEqual(manifest["blender_version_min"], "4.2.0")
         self.assertIn("SPDX:GPL-3.0-or-later", manifest["license"])
 
@@ -112,7 +135,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         info = ast.literal_eval(info_node.value)
         self.assertEqual(info["name"], "CatTools")
-        self.assertEqual(info["version"], (1, 1, 0))
+        self.assertEqual(info["version"], (1, 2, 0))
         self.assertEqual(info["blender"], (4, 2, 0))
 
     def test_registered_class_order(self) -> None:
@@ -192,11 +215,12 @@ class CatToolsSmokeTest(unittest.TestCase):
             "OBJECT_PT_Spacing",
             "OBJECT_PT_Mirror_Modifier",
         ]
+        self.assertEqual(module_constant(self.tree, "CAT_CATEGORY"), "CatTools")
         for panel_name in panel_names:
             with self.subTest(panel=panel_name):
                 self.assertEqual(
-                    assignment_value(self.classes[panel_name], "bl_category"),
-                    "CatTools",
+                    assignment_name(self.classes[panel_name], "bl_category"),
+                    "CAT_CATEGORY",
                 )
 
     def test_transform_and_align_row_tables(self) -> None:
@@ -425,6 +449,48 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertIn('"OPEN_EXR"', source)
         self.assertIn('"Non-Color"', source)
         self.assertIn("assert len(tones) == 2", source)
+
+    def test_sidebar_shortcut_contract(self) -> None:
+        operator = self.classes["VIEW3D_OT_CatSidebar"]
+        self.assertEqual(
+            assignment_value(operator, "bl_idname"), "view3d.cat_toggle_sidebar"
+        )
+        # 사이드바 토글은 컨텍스트 오버라이드에서도 양방향으로 동작하는
+        # region_toggle을 사용해야 한다.
+        self.assertIn("bpy.ops.screen.region_toggle(region_type='UI')", self.source)
+        self.assertIn("region.active_panel_category = CAT_CATEGORY", self.source)
+
+        # N 키를 애드온 키맵의 3D View 항목에 연결한다.
+        self.assertIn("keyconfigs.addon", self.source)
+        self.assertIn("""keymaps.new(name="3D View", space_type='VIEW_3D')""", self.source)
+        self.assertIn(
+            "keymap_items.new(VIEW3D_OT_CatSidebar.bl_idname, 'N', 'PRESS')", self.source
+        )
+
+        # 사이드바를 여는 프레임에는 탭 목록이 없어 대입이 거부되므로 재시도한다.
+        self.assertIn("(AttributeError, TypeError, ValueError)", self.source)
+        self.assertIn("bpy.app.timers.register(_activate_cat_tab_timer", self.source)
+
+        # 해제 시 단축키, 핸들러, 타이머를 모두 되돌린다.
+        for cleanup in (
+            "unregister_keymaps()",
+            "bpy.app.handlers.load_post.remove(_on_load_post)",
+            "bpy.app.timers.unregister(_activate_cat_tab_timer)",
+        ):
+            with self.subTest(cleanup=cleanup):
+                self.assertIn(cleanup, self.source)
+
+    def test_sidebar_runtime_smoke_requires_drawn_window(self) -> None:
+        source = SIDEBAR_SMOKE_PATH.read_text(encoding="utf-8")
+        compile(source, str(SIDEBAR_SMOKE_PATH), "exec")
+        self.assertIn("importlib.import_module(MODULE_NAME)", source)
+        self.assertIn("registered_here", source)
+        self.assertIn("bpy.ops.view3d.cat_toggle_sidebar()", source)
+        # 탭 목록은 그리기 이후 생성되므로 창을 강제로 한 프레임 그린다.
+        self.assertIn('bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)', source)
+        self.assertIn("region.active_panel_category == addon.CAT_CATEGORY", source)
+        self.assertIn("addon._on_load_post(None)", source)
+        self.assertIn("해제 후에도 단축키가 남아 있습니다", source)
 
     def test_remote_repository_distribution(self) -> None:
         workflow = PAGES_WORKFLOW_PATH.read_text(encoding="utf-8")

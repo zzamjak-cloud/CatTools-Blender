@@ -9,6 +9,7 @@ CatTools는 CAT 블록 모델링 작업에 사용해 온 **Woody Tools**의 최�
 
 ## 제공 기능
 
+- N 키 사이드바 단축키: 사이드바를 열 때 CatTools 탭을 활성 탭으로 지정 (사이드바가 열린 상태로 저장된 파일도 파일 로드 시 CatTools 탭으로 복원). 탭 목록에서 Item·Tool·View는 Blender 내부에 정의되어 있어 CatTools를 그 위로 옮길 수는 없고, 활성 탭만 지정한다.
 - Transform 축약 필드: Loc·Rot·Sca를 각각 한 줄 3열 그리드로 표시하며, 사이드바가 좁아지면 라벨을 L·R·S로 축약
 - Align 축약 버튼: 활성 오브젝트를 기준으로 선택 오브젝트의 Loc·Rot·Sca를 X·Y·Z·All 축별 정렬
 - 기본 머티리얼 생성
@@ -87,6 +88,12 @@ Catoon 셀셰이딩이 실제로 2톤으로 렌더링되는지 확인하려면 �
 ./scripts/dev_run.sh --background --python tests/blender_catoon_smoke.py
 ```
 
+N 키 사이드바 토글과 CatTools 탭 활성화를 확인하려면 창이 필요하므로 `--background` 없이 실행합니다.
+
+```bash
+./scripts/dev_run.sh --python tests/blender_sidebar_smoke.py
+```
+
 기능 수정 중에는 이 개발 프로필을 사용하며 GitHub 릴리스나 원격 설치본을 매번 갱신할 필요가 없습니다.
 
 #### Windows
@@ -132,6 +139,12 @@ Blender가 설치된 환경에서는 실제 미러 동작도 확인할 수 있�
 
 ```bash
 blender --background --factory-startup --python tests/blender_mirror_smoke.py
+```
+
+사이드바 단축키 검사는 탭 목록이 그리기 단계에서 만들어지므로 창을 띄운 상태로 실행합니다.
+
+```bash
+blender --factory-startup --python-exit-code 1 --python tests/blender_sidebar_smoke.py
 ```
 
 검사는 Python 문법, Extension 매니페스트, 등록 클래스 순서, 기존 `bl_idname` 호환성과 X·Y·Z 미러 방향을 확인합니다. 첫 릴리스는 Blender 5.2 LTS에서 등록·해제와 등록 연산자 10개 실행을 검증했습니다.

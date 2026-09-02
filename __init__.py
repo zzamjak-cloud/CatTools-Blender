@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -44,6 +44,9 @@ TRANSFORM_COMPACT_LABEL_UNITS = 0.8
 TRANSFORM_COMPACT_WIDTH = 200
 
 CATOON_BASE_IMAGE_NAME = "CatoonBaseColor"
+
+# 사이드바 탭 이름. 패널 bl_category와 N 키 오버라이드가 같은 값을 공유한다.
+CAT_CATEGORY = "CatTools"
 
 # Catoon 셀셰이딩 노드 그룹의 (소켓명, 타입, 기본값).
 # Light Color를 흰색으로 두어 밝은 면은 텍스처 색이 그대로 살아나고,
@@ -143,7 +146,7 @@ class OBJECT_PT_WoodyTool(Panel):
     bl_idname = "OBJECT_PT_woodytool"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "CatTools"
+    bl_category = CAT_CATEGORY
 
     def draw(self, context):
         layout = self.layout
@@ -250,7 +253,7 @@ class OBJECT_PT_Spacing(Panel):
     bl_idname = "OBJECT_PT_spacing"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "CatTools"
+    bl_category = CAT_CATEGORY
     bl_parentid = "OBJECT_PT_woodytool"
     bl_options = {"DEFAULT_CLOSED"}
 
@@ -278,7 +281,7 @@ class OBJECT_PT_Mirror_Modifier(Panel):
     bl_idname = "OBJECT_PT_Mirror_Modifier"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "CatTools"
+    bl_category = CAT_CATEGORY
     bl_parentid = "OBJECT_PT_woodytool"
     bl_options = {"DEFAULT_CLOSED"}
 
@@ -1408,8 +1411,87 @@ class OBJECT_OT_CatAlign(Operator):
         return {'FINISHED'}
 
 
+# 사이드바 탭 활성화 -----------------------------------------------------------------------
+
+def activate_cat_tab_in_open_sidebars() -> None:
+    """열려 있는 모든 3D 뷰 사이드바의 활성 탭을 CatTools로 맞춘다.
+
+    사이드바를 방금 연 프레임에는 탭 목록이 아직 만들어지지 않아 대입이
+    read-only로 거부된다. 그래서 실패하면 다음 프레임에 다시 시도한다.
+    """
+    retry = False
+    for window in bpy.context.window_manager.windows:
+        screen = window.screen
+        if screen is None:
+            continue
+        for area in screen.areas:
+            if area.type != 'VIEW_3D':
+                continue
+            space = area.spaces.active
+            if space is None or not space.show_region_ui:
+                continue
+            region = next((r for r in area.regions if r.type == 'UI'), None)
+            if region is None:
+                continue
+            try:
+                region.active_panel_category = CAT_CATEGORY
+            except (AttributeError, TypeError, ValueError):
+                retry = True
+
+    if retry and not bpy.app.timers.is_registered(_activate_cat_tab_timer):
+        bpy.app.timers.register(_activate_cat_tab_timer, first_interval=0.0)
+
+
+def _activate_cat_tab_timer():
+    activate_cat_tab_in_open_sidebars()
+    return None
+
+
+class VIEW3D_OT_CatSidebar(Operator):
+    """사이드바를 토글하고, 열 때 CatTools 탭을 활성화합니다."""
+    bl_idname = "view3d.cat_toggle_sidebar"
+    bl_label = "Toggle Sidebar (CatTools)"
+
+    @classmethod
+    def poll(cls, context):
+        return context.space_data is not None and context.space_data.type == 'VIEW_3D'
+
+    def execute(self, context) -> Set[str]:
+        # show_region_ui 대입은 컨텍스트 오버라이드 아래에서 닫기 방향이 적용되지
+        # 않으므로, 영역 컨텍스트를 그대로 쓰는 region_toggle로 토글한다.
+        bpy.ops.screen.region_toggle(region_type='UI')
+        if context.space_data.show_region_ui:
+            activate_cat_tab_in_open_sidebars()
+        return {'FINISHED'}
+
+
+@bpy.app.handlers.persistent
+def _on_load_post(_dummy) -> None:
+    # 사이드바가 이미 열린 상태로 저장된 파일에서도 CatTools가 먼저 보이게 한다.
+    activate_cat_tab_in_open_sidebars()
+
+
+addon_keymaps = []
+
+
+def register_keymaps() -> None:
+    keyconfig = bpy.context.window_manager.keyconfigs.addon
+    if keyconfig is None:
+        return
+    keymap = keyconfig.keymaps.new(name="3D View", space_type='VIEW_3D')
+    item = keymap.keymap_items.new(VIEW3D_OT_CatSidebar.bl_idname, 'N', 'PRESS')
+    addon_keymaps.append((keymap, item))
+
+
+def unregister_keymaps() -> None:
+    for keymap, item in addon_keymaps:
+        keymap.keymap_items.remove(item)
+    addon_keymaps.clear()
+
+
 classes = [
     OBJECT_PT_WoodyTool,
+    VIEW3D_OT_CatSidebar,
     OBJECT_OT_CatAlign,
     # OBJECT_PT_Spacing,
     # OBJECT_PT_Mirror_Modifier,
@@ -1435,8 +1517,16 @@ classes = [
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    register_keymaps()
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
 
 def unregister():
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
+    if bpy.app.timers.is_registered(_activate_cat_tab_timer):
+        bpy.app.timers.unregister(_activate_cat_tab_timer)
+    unregister_keymaps()
     for cls in classes:
         bpy.utils.unregister_class(cls)
 
