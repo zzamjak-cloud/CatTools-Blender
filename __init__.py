@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 2, 0),
+    "version": (1, 3, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -16,7 +16,7 @@ import bpy, math, bmesh
 from typing import Set
 from bpy.types import Context, Panel, Operator
 from bpy.props import StringProperty, FloatProperty, BoolProperty, IntProperty, EnumProperty
-from mathutils import Euler, Quaternion
+from mathutils import Euler, Matrix, Quaternion, Vector
 
 # Transform / Align 행의 (기본 라벨, 축약 라벨, 대상) — 3x3 축약 그리드
 TRANSFORM_ROWS = (
@@ -140,6 +140,167 @@ def apply_rotation_euler(obj, euler: Euler) -> None:
         obj.rotation_euler = euler
 
 
+# ---------------------------------------------------------------------------
+# Edit 모드 선택 요소(점/선/면) Transform
+# 선/면 선택도 select flush로 정점 선택에 반영되므로, 선택 정점 집합 하나로 처리한다.
+# 값은 모두 월드 좌표 기준이며 여러 오브젝트를 함께 편집 중이어도 한 번에 다룬다.
+# ---------------------------------------------------------------------------
+
+# 요소에는 회전/스케일 절대값이 없으므로, 같은 선택에서 누적 입력한 값을 보관해
+# 새 입력과의 차이만큼만 적용한다. 선택이 바뀌거나 Undo하면 초기화된다.
+_edit_transform_state = {"signature": None, "rotation": (0.0, 0.0, 0.0), "scale": (1.0, 1.0, 1.0)}
+
+
+def edit_mesh_targets(context):
+    """선택 요소 Transform 대상이 되는 (오브젝트, BMesh, 선택 정점 목록)을 반환합니다."""
+    if context.mode != 'EDIT_MESH':
+        return []
+    # 메시를 공유하는 오브젝트가 있어도 같은 데이터를 두 번 변형하지 않도록 unique_data 사용
+    objects = getattr(context, "objects_in_mode_unique_data", None) or [context.edit_object]
+    targets = []
+    for obj in objects:
+        if obj is None or obj.type != 'MESH':
+            continue
+        bm = bmesh.from_edit_mesh(obj.data)
+        verts = [v for v in bm.verts if v.select and not v.hide]
+        if verts:
+            targets.append((obj, bm, verts))
+    return targets
+
+
+def edit_selection_median(targets):
+    total = Vector()
+    count = 0
+    for obj, _bm, verts in targets:
+        matrix = obj.matrix_world
+        for vert in verts:
+            total += matrix @ vert.co
+        count += len(verts)
+    return total / count if count else None
+
+
+def edit_selection_signature(targets):
+    signature = []
+    for obj, bm, verts in targets:
+        bm.verts.index_update()
+        signature.append((obj.name, len(bm.verts), tuple(v.index for v in verts)))
+    return tuple(signature)
+
+
+def edit_transform_state(targets):
+    signature = edit_selection_signature(targets)
+    if _edit_transform_state["signature"] != signature:
+        _edit_transform_state.update(signature=signature, rotation=(0.0, 0.0, 0.0), scale=(1.0, 1.0, 1.0))
+    return _edit_transform_state
+
+
+def apply_edit_world_matrix(targets, world_matrix: Matrix) -> None:
+    """월드 공간 변환 행렬을 각 오브젝트 로컬 공간으로 환산해 선택 정점에 적용합니다."""
+    for obj, _bm, verts in targets:
+        matrix = obj.matrix_world
+        local = matrix.inverted_safe() @ world_matrix @ matrix
+        for vert in verts:
+            vert.co = local @ vert.co
+        bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+
+
+def pivot_matrix(pivot: Vector, matrix: Matrix) -> Matrix:
+    return Matrix.Translation(pivot) @ matrix @ Matrix.Translation(-pivot)
+
+
+def _get_edit_location(_self):
+    median = edit_selection_median(edit_mesh_targets(bpy.context))
+    return tuple(median) if median is not None else (0.0, 0.0, 0.0)
+
+
+def _set_edit_location(_self, value):
+    targets = edit_mesh_targets(bpy.context)
+    median = edit_selection_median(targets)
+    if median is None:
+        return
+    apply_edit_world_matrix(targets, Matrix.Translation(Vector(value) - median))
+    # 이동은 선택 정점 인덱스를 바꾸지 않으므로 누적 회전/스케일은 유지된다.
+
+
+def _get_edit_rotation(_self):
+    targets = edit_mesh_targets(bpy.context)
+    return edit_transform_state(targets)["rotation"] if targets else (0.0, 0.0, 0.0)
+
+
+def _set_edit_rotation(_self, value):
+    targets = edit_mesh_targets(bpy.context)
+    median = edit_selection_median(targets)
+    if median is None:
+        return
+    state = edit_transform_state(targets)
+    old = Euler(state["rotation"], 'XYZ').to_matrix()
+    new = Euler(value, 'XYZ').to_matrix()
+    delta = (new @ old.transposed()).to_4x4()
+    apply_edit_world_matrix(targets, pivot_matrix(median, delta))
+    state["rotation"] = tuple(value)
+
+
+def _get_edit_scale(_self):
+    targets = edit_mesh_targets(bpy.context)
+    return edit_transform_state(targets)["scale"] if targets else (1.0, 1.0, 1.0)
+
+
+def _set_edit_scale(_self, value):
+    targets = edit_mesh_targets(bpy.context)
+    median = edit_selection_median(targets)
+    if median is None:
+        return
+    state = edit_transform_state(targets)
+    old = state["scale"]
+    # 0으로 눌린 축은 비율을 되돌릴 수 없으므로 해당 축은 건너뛰고 이전 값을 유지한다.
+    factors = [new / prev if abs(prev) > 1e-9 else 1.0 for new, prev in zip(value, old)]
+    delta = Matrix.Diagonal((*factors, 1.0))
+    apply_edit_world_matrix(targets, pivot_matrix(median, delta))
+    state["scale"] = tuple(new if abs(prev) > 1e-9 else prev for new, prev in zip(value, old))
+
+
+@bpy.app.handlers.persistent
+def _reset_edit_transform_state(*_args) -> None:
+    # Undo/Redo 후 메시와 누적값이 어긋나지 않도록 초기화
+    _edit_transform_state["signature"] = None
+
+
+EDIT_TRANSFORM_PROPERTIES = {
+    "cat_edit_location": lambda: bpy.props.FloatVectorProperty(
+        name="Location", description="선택 요소의 중앙값 위치(월드)", subtype='TRANSLATION',
+        unit='LENGTH', size=3, get=_get_edit_location, set=_set_edit_location,
+    ),
+    "cat_edit_rotation": lambda: bpy.props.FloatVectorProperty(
+        name="Rotation", description="선택 요소를 중앙값 기준으로 회전(월드 축)", subtype='EULER',
+        unit='ROTATION', size=3, get=_get_edit_rotation, set=_set_edit_rotation,
+    ),
+    "cat_edit_scale": lambda: bpy.props.FloatVectorProperty(
+        name="Scale", description="선택 요소를 중앙값 기준으로 스케일(월드 축)", subtype='XYZ',
+        size=3, get=_get_edit_scale, set=_set_edit_scale,
+    ),
+}
+EDIT_TRANSFORM_ROWS = (
+    ("Loc", "L", "cat_edit_location"),
+    ("Rot", "R", "cat_edit_rotation"),
+    ("Sca", "S", "cat_edit_scale"),
+)
+EDIT_RESET_HANDLERS = (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post)
+
+
+# 커서의 rotation_mode에 맞는 회전 속성을 골라, 쿼터니언/축-각도 모드에서도 실제 값을 편집하게 한다.
+def cursor_rows(cursor):
+    if cursor.rotation_mode == 'QUATERNION':
+        rotation_property = "rotation_quaternion"
+    elif cursor.rotation_mode == 'AXIS_ANGLE':
+        rotation_property = "rotation_axis_angle"
+    else:
+        rotation_property = "rotation_euler"
+    return (
+        ("Loc", "L", "location"),
+        ("Rot", "R", rotation_property),
+    )
+
+
 # 메인 패널: 사이드바 메뉴 UI 설정
 class OBJECT_PT_WoodyTool(Panel):
     bl_label = "CatTools"
@@ -158,7 +319,9 @@ class OBJECT_PT_WoodyTool(Panel):
 
         # Transform 축약 필드: 행 라벨 + 한 줄 3열로 공간을 최소화
         layout.label(text="Transform :", icon="OUTLINER_DATA_EMPTY")
-        if selected_object:
+        if context.mode == 'EDIT_MESH':
+            self.draw_edit_transform(context, layout, compact, label_units)
+        elif selected_object:
             column = layout.column(align=True)
             for full_label, short_label, property_name in TRANSFORM_ROWS:
                 row = column.row(align=True)
@@ -170,6 +333,21 @@ class OBJECT_PT_WoodyTool(Panel):
                     fields.prop(selected_object, property_name, index=index, text="")
         else:
             layout.label(text="오브젝트를 선택하세요.")
+
+        layout.separator(factor=1)
+
+    # 3D 커서: View 탭의 3D Cursor 위치/회전을 Transform과 같은 축약 그리드로 표시
+        layout.label(text="3D Cursor :", icon="PIVOT_CURSOR")
+        cursor = context.scene.cursor
+        column = layout.column(align=True)
+        for full_label, short_label, property_name in cursor_rows(cursor):
+            row = column.row(align=True)
+            label_column = row.column(align=True)
+            label_column.ui_units_x = label_units
+            label_column.label(text=short_label if compact else full_label)
+            fields = row.row(align=True)
+            for index in range(len(getattr(cursor, property_name))):
+                fields.prop(cursor, property_name, index=index, text="")
 
         layout.separator(factor=1)
 
@@ -188,6 +366,15 @@ class OBJECT_PT_WoodyTool(Panel):
                 )
                 operator.mode = align_mode
                 operator.axis = axis
+
+        layout.separator(factor=1)
+
+    # 선택: 활성 오브젝트와 같은 축 피벗(원점) 값을 가진 오브젝트를 모두 선택
+        layout.label(text="Select :", icon="RESTRICT_SELECT_OFF")
+        row = layout.row(align=True)
+        for axis in ('X', 'Y', 'Z'):
+            operator = row.operator(OBJECT_OT_CatSelectSamePivot.bl_idname, text=axis)
+            operator.axis = axis
 
         layout.separator(factor=1)
 
@@ -232,11 +419,17 @@ class OBJECT_PT_WoodyTool(Panel):
         row.operator(Add_Lattice.bl_idname, text= Add_Lattice.bl_label, icon= 'MOD_LATTICE')
         row.operator(CircleArray.bl_idname, text=CircleArray.bl_label, icon="OUTLINER_DATA_POINTCLOUD")
 
-        row = layout.row()
-        # Mirror 모디파이어 추가 버튼
-        row.operator(Add_Mirror_X_Modifier.bl_idname, text=Add_Mirror_X_Modifier.bl_label, icon="MOD_MIRROR")
-        row.operator(Add_Mirror_Y_Modifier.bl_idname, text=Add_Mirror_Y_Modifier.bl_label, icon="MOD_MIRROR")
-        row.operator(Add_Mirror_Z_Modifier.bl_idname, text=Add_Mirror_Z_Modifier.bl_label, icon="MOD_MIRROR")
+        # Mirror 모디파이어 추가 버튼: 축마다 남길 쪽(-/+)을 고른다.
+        column = layout.column(align=True)
+        for side, sign, _description in reversed(MIRROR_SIDE_ITEMS):
+            row = column.row(align=True)
+            for operator_class in (Add_Mirror_X_Modifier, Add_Mirror_Y_Modifier, Add_Mirror_Z_Modifier):
+                operator = row.operator(
+                    operator_class.bl_idname,
+                    text=f"{sign}{operator_class.bl_label}",
+                    icon="MOD_MIRROR",
+                )
+                operator.side = side
 
 
         layout.separator(factor=1)
@@ -244,6 +437,26 @@ class OBJECT_PT_WoodyTool(Panel):
         # 텍스트 추가
         # layout.label(text="Text :", icon = 'OUTLINER_OB_FONT')
         # layout.operator(Add_Text.bl_idname, text= Add_Text.bl_label)
+
+
+    # Edit 모드: 선택한 점/선/면의 중앙값 위치와 중앙값 기준 회전/스케일
+    @staticmethod
+    def draw_edit_transform(context, layout, compact, label_units):
+        targets = edit_mesh_targets(context)
+        if not targets:
+            layout.label(text="점, 선, 면을 선택하세요.")
+            return
+        count = sum(len(verts) for _obj, _bm, verts in targets)
+        layout.label(text=f"{'Vertex' if count == 1 else 'Median'} (Global) · {count} verts")
+        column = layout.column(align=True)
+        for full_label, short_label, property_name in EDIT_TRANSFORM_ROWS:
+            row = column.row(align=True)
+            label_column = row.column(align=True)
+            label_column.ui_units_x = label_units
+            label_column.label(text=short_label if compact else full_label)
+            fields = row.row(align=True)
+            for index in range(3):
+                fields.prop(context.scene, property_name, index=index, text="")
 
 
 # 텍스트 패널: 텍스트 생성 후 간격 옵션 ----------------------------------------
@@ -741,7 +954,7 @@ class SHADER_OP_Blend4Tex(Operator):
 
 
 class SHADER_OP_TwoSideTex(Operator):
-    bl_label = "TwoSideTex"
+    bl_label = "TwoSide"
     bl_idname = 'shader.twosidetex_operator'
 
     def execute(self, context):
@@ -1198,158 +1411,82 @@ class Add_Text(Operator):
         return {'FINISHED'}
 
 
-# Mirror 모디파이어
-class Add_Mirror_X_Modifier(Operator):
+# Mirror 모디파이어 -----------------------------------------------------------------
+# side는 남길(원본) 쪽이다. +X면 +X 절반을 남기고 -X 쪽으로 미러한다.
+MIRROR_SIDE_ITEMS = (
+    ('NEGATIVE', "-", "음수 쪽을 남기고 양수 쪽으로 미러"),
+    ('POSITIVE', "+", "양수 쪽을 남기고 음수 쪽으로 미러"),
+)
+# 경계 근처 버텍스를 0으로 스냅할 허용 거리
+MIRROR_SNAP_DISTANCE = 0.01
+
+
+def apply_axis_mirror(obj, axis_index: int, side: str) -> None:
+    """반대쪽 절반을 제거하고 지정 축 하나만 켠 Mirror 모디파이어를 다시 만듭니다."""
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode='EDIT')
+    bm = bmesh.from_edit_mesh(obj.data)
+
+    # 남길 쪽 부호로 좌표를 뒤집어 비교하면 양방향을 한 규칙으로 처리할 수 있다.
+    sign = 1.0 if side == 'POSITIVE' else -1.0
+    for vertex in bm.verts:
+        if -MIRROR_SNAP_DISTANCE < vertex.co[axis_index] * sign < 0:
+            vertex.co[axis_index] = 0
+
+    # 반대쪽 영역만 제거하고, 제거할 버텍스가 없어도 미러 추가를 계속 진행
+    vertices_to_delete = [vertex for vertex in bm.verts if vertex.co[axis_index] * sign < 0.0]
+    if vertices_to_delete:
+        bmesh.ops.delete(bm, geom=vertices_to_delete, context='VERTS')
+
+    bmesh.update_edit_mesh(obj.data)
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    # 순회 중 삭제하면 항목을 건너뛰므로 목록을 먼저 만든다.
+    for modifier in [m for m in obj.modifiers if m.type == 'MIRROR']:
+        obj.modifiers.remove(modifier)
+
+    mirror_modifier = obj.modifiers.new("Mirror", 'MIRROR')
+    for index in range(3):
+        mirror_modifier.use_axis[index] = index == axis_index
+
+
+class MirrorModifierOperator:
+    bl_options = {'REGISTER', 'UNDO'}
+    axis_index = 0
+
+    side: EnumProperty(name="Side", items=MIRROR_SIDE_ITEMS, default='POSITIVE')
+
+    @classmethod
+    def poll(cls, context):
+        return context.object is not None and context.object.type == 'MESH'
+
+    def execute(self, context):
+        apply_axis_mirror(context.object, self.axis_index, self.side)
+        return {'FINISHED'}
+
+
+class Add_Mirror_X_Modifier(MirrorModifierOperator, Operator):
+    """선택한 쪽 X 절반을 남기고 X축 Mirror 모디파이어를 추가합니다."""
     bl_idname = "wm.add_mirror_x_modifier"
     bl_label = "X"
+    axis_index = 0
 
-    def execute(self, context):
-        # 선택한 오브젝트 가져오기
-        obj = bpy.context.object
+    # 기존 호출 호환: X는 원래 음수 쪽을 남겼다.
+    side: EnumProperty(name="Side", items=MIRROR_SIDE_ITEMS, default='NEGATIVE')
 
-        # Edit 모드로 전환
-        bpy.context.view_layer.objects.active = obj
-        bpy.ops.object.mode_set(mode='EDIT')
 
-        # BMesh 생성
-        bm = bmesh.from_edit_mesh(obj.data)
-
-        # 0 < x < 0.01 사이의 버텍스는 모두 0으로 이동
-        for vertex in bm.verts:
-            if 0 < vertex.co.x < 0.01:
-                vertex.co.x = 0
-
-        # 양수 X 영역만 제거하고, 제거할 버텍스가 없어도 미러 추가를 계속 진행
-        vertices_to_delete = [vertex for vertex in bm.verts if vertex.co.x > 0.0]
-        if vertices_to_delete:
-            bmesh.ops.delete(
-                bm,
-                geom=vertices_to_delete,
-                context='VERTS'
-            )
-
-        # BMesh 데이터를 오브젝트에 적용
-        bmesh.update_edit_mesh(obj.data)
-
-        #Object 모드로 전환
-        bpy.ops.object.mode_set(mode='OBJECT')
-
-        # 모디파이어 리스트
-        modifiers = obj.modifiers
-
-        for modifier in modifiers:
-            if modifier.type == 'MIRROR':
-                modifiers.remove(modifier)
-
-        # Mirror 모디파이어 추가
-        mirror_modifier = obj.modifiers.new("Mirror", 'MIRROR')
-        mirror_modifier.use_axis[0] = True
-        mirror_modifier.use_axis[1] = False
-        mirror_modifier.use_axis[2] = False
-
-        return {'FINISHED'}
-
-# Mirror 모디파이어
-class Add_Mirror_Y_Modifier(Operator):
+class Add_Mirror_Y_Modifier(MirrorModifierOperator, Operator):
+    """선택한 쪽 Y 절반을 남기고 Y축 Mirror 모디파이어를 추가합니다."""
     bl_idname = "wm.add_mirror_y_modifier"
     bl_label = "Y"
+    axis_index = 1
 
-    def execute(self, context):
-        # 선택한 오브젝트 가져오기
-        obj = bpy.context.object
 
-        # Edit 모드로 전환
-        bpy.context.view_layer.objects.active = obj
-        bpy.ops.object.mode_set(mode='EDIT')
-
-        # BMesh 생성
-        bm = bmesh.from_edit_mesh(obj.data)
-
-        # -0.01 < y < 0 사이의 버텍스는 모두 0으로 이동
-        for vertex in bm.verts:
-            if -0.01 < vertex.co.y < 0:
-                vertex.co.y = 0
-
-        # 음수 Y 영역만 제거하고, 제거할 버텍스가 없어도 미러 추가를 계속 진행
-        vertices_to_delete = [vertex for vertex in bm.verts if vertex.co.y < 0.0]
-        if vertices_to_delete:
-            bmesh.ops.delete(
-                bm,
-                geom=vertices_to_delete,
-                context='VERTS'
-            )
-
-        # BMesh 데이터를 오브젝트에 적용
-        bmesh.update_edit_mesh(obj.data)
-
-        #Object 모드로 전환
-        bpy.ops.object.mode_set(mode='OBJECT')
-
-        # 모디파이어 리스트
-        modifiers = obj.modifiers
-
-        for modifier in modifiers:
-            if modifier.type == 'MIRROR':
-                modifiers.remove(modifier)
-
-        # Mirror 모디파이어 추가
-        mirror_modifier = obj.modifiers.new("Mirror", 'MIRROR')
-        mirror_modifier.use_axis[0] = False
-        mirror_modifier.use_axis[1] = True
-        mirror_modifier.use_axis[2] = False
-
-        return {'FINISHED'}
-
-# Mirror 모디파이어
-class Add_Mirror_Z_Modifier(Operator):
+class Add_Mirror_Z_Modifier(MirrorModifierOperator, Operator):
+    """선택한 쪽 Z 절반을 남기고 Z축 Mirror 모디파이어를 추가합니다."""
     bl_idname = "wm.add_mirror_z_modifier"
     bl_label = "Z"
-
-    def execute(self, context):
-        # 선택한 오브젝트 가져오기
-        obj = bpy.context.object
-
-        # Edit 모드로 전환
-        bpy.context.view_layer.objects.active = obj
-        bpy.ops.object.mode_set(mode='EDIT')
-
-        # BMesh 생성
-        bm = bmesh.from_edit_mesh(obj.data)
-
-        # -0.01 < z < 0 사이의 버텍스는 모두 0으로 이동
-        for vertex in bm.verts:
-            if -0.01 < vertex.co.z < 0:
-                vertex.co.z = 0
-
-        # 음수 Z 영역만 제거하고, 제거할 버텍스가 없어도 미러 추가를 계속 진행
-        vertices_to_delete = [vertex for vertex in bm.verts if vertex.co.z < 0.0]
-        if vertices_to_delete:
-            bmesh.ops.delete(
-                bm,
-                geom=vertices_to_delete,
-                context='VERTS'
-            )
-
-        # BMesh 데이터를 오브젝트에 적용
-        bmesh.update_edit_mesh(obj.data)
-
-        #Object 모드로 전환
-        bpy.ops.object.mode_set(mode='OBJECT')
-
-        # 모디파이어 리스트
-        modifiers = obj.modifiers
-
-        for modifier in modifiers:
-            if modifier.type == 'MIRROR':
-                modifiers.remove(modifier)
-
-        # Mirror 모디파이어 추가
-        mirror_modifier = obj.modifiers.new("Mirror", 'MIRROR')
-        mirror_modifier.use_axis[0] = False
-        mirror_modifier.use_axis[1] = False
-        mirror_modifier.use_axis[2] = True
-
-        return {'FINISHED'}
+    axis_index = 2
 
 
 # 정렬 연산자 -----------------------------------------------------------------------------
@@ -1447,6 +1584,135 @@ def _activate_cat_tab_timer():
     return None
 
 
+EDIT_ELEMENT_TYPES = {
+    'VERT': bmesh.types.BMVert,
+    'EDGE': bmesh.types.BMEdge,
+    'FACE': bmesh.types.BMFace,
+}
+
+
+def edit_elements(bm, element_kind):
+    return {'VERT': bm.verts, 'EDGE': bm.edges, 'FACE': bm.faces}[element_kind]
+
+
+def edit_element_center(element) -> Vector:
+    """요소의 로컬 중심 좌표: 점은 위치, 선은 양 끝 중점, 면은 정점 중앙값."""
+    if isinstance(element, bmesh.types.BMVert):
+        return element.co
+    if isinstance(element, bmesh.types.BMEdge):
+        return (element.verts[0].co + element.verts[1].co) / 2
+    return element.calc_center_median()
+
+
+class OBJECT_OT_CatSelectSamePivot(Operator):
+    """지정 축의 월드 좌표가 기준과 같은 오브젝트(Object 모드) 또는 점/선/면(Edit 모드)을 모두 선택합니다."""
+    bl_idname = "object.cat_select_same_pivot"
+    bl_label = "Select Same Pivot"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    axis: EnumProperty(
+        name="Axis",
+        items=[
+            ('X', "X", "X축 피벗이 같은 오브젝트 선택"),
+            ('Y', "Y", "Y축 피벗이 같은 오브젝트 선택"),
+            ('Z', "Z", "Z축 피벗이 같은 오브젝트 선택"),
+        ],
+        default='Z',
+    )
+    # 모델링 중 생기는 부동소수 오차 때문에 완전 일치 비교는 쓰지 않는다.
+    tolerance: FloatProperty(
+        name="Tolerance", default=0.0001, min=0.0, soft_max=0.1,
+        precision=4, subtype='DISTANCE', unit='LENGTH',
+    )
+    extend: BoolProperty(name="Extend", description="기존 선택을 유지한 채 추가 선택", default=False)
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode == 'EDIT_MESH':
+            return True
+        return context.mode == 'OBJECT' and context.active_object is not None
+
+    def execute(self, context) -> Set[str]:
+        if context.mode == 'EDIT_MESH':
+            return self.execute_edit_mesh(context)
+        active_object = context.active_object
+        index = ALIGN_AXIS_INDICES[self.axis]
+        # 부모가 있어도 화면에서 보이는 원점 위치로 비교하도록 월드 좌표를 쓴다.
+        reference = active_object.matrix_world.translation[index]
+
+        count = 0
+        for obj in context.selectable_objects:
+            matched = abs(obj.matrix_world.translation[index] - reference) <= self.tolerance
+            if matched:
+                obj.select_set(True)
+                count += 1
+            elif not self.extend:
+                obj.select_set(False)
+
+        active_object.select_set(True)
+        self.report({'INFO'}, f"{self.axis}축 피벗이 같은 오브젝트 {count}개를 선택했습니다.")
+        return {'FINISHED'}
+
+    # Edit 모드: 현재 선택 모드(점/선/면)의 요소 중심 좌표를 축별로 비교해 같은 값을 가진 요소를 선택
+    def execute_edit_mesh(self, context) -> Set[str]:
+        vert_mode, edge_mode, face_mode = context.tool_settings.mesh_select_mode
+        element_kind = 'FACE' if face_mode else 'EDGE' if edge_mode else 'VERT'
+        index = ALIGN_AXIS_INDICES[self.axis]
+
+        objects = getattr(context, "objects_in_mode_unique_data", None) or [context.edit_object]
+        meshes = []
+        for obj in objects:
+            if obj is None or obj.type != 'MESH':
+                continue
+            bm = bmesh.from_edit_mesh(obj.data)
+            meshes.append((obj, bm, [e for e in edit_elements(bm, element_kind) if not e.hide]))
+
+        reference = self.edit_reference(context, meshes, element_kind, index)
+        if reference is None:
+            self.report({'WARNING'}, "기준이 될 점, 선, 면을 선택하세요.")
+            return {'CANCELLED'}
+
+        count = 0
+        for obj, bm, elements in meshes:
+            matrix = obj.matrix_world
+            matched = [
+                e for e in elements
+                if abs((matrix @ edit_element_center(e))[index] - reference) <= self.tolerance
+            ]
+            if not self.extend:
+                for sequence in (bm.verts, bm.edges, bm.faces):
+                    for element in sequence:
+                        element.select = False
+            for element in matched:
+                element.select_set(True)
+            bm.select_flush_mode()
+            bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+            count += len(matched)
+
+        kind_label = {'VERT': "점", 'EDGE': "선", 'FACE': "면"}[element_kind]
+        self.report({'INFO'}, f"{self.axis}축 값이 같은 {kind_label} {count}개를 선택했습니다.")
+        return {'FINISHED'}
+
+    @staticmethod
+    def edit_reference(context, meshes, element_kind, index):
+        # 활성 요소(마지막으로 클릭한 요소)를 우선 기준으로 삼고, 없으면 선택 요소들의 중앙값을 쓴다.
+        element_type = EDIT_ELEMENT_TYPES[element_kind]
+        for obj, bm, _elements in meshes:
+            if obj != context.edit_object:
+                continue
+            active = bm.select_history.active
+            if isinstance(active, element_type) and active.select:
+                return (obj.matrix_world @ edit_element_center(active))[index]
+
+        centers = [
+            (obj.matrix_world @ edit_element_center(e))[index]
+            for obj, _bm, elements in meshes
+            for e in elements
+            if e.select
+        ]
+        return sum(centers) / len(centers) if centers else None
+
+
 class VIEW3D_OT_CatSidebar(Operator):
     """사이드바를 토글하고, 열 때 CatTools 탭을 활성화합니다."""
     bl_idname = "view3d.cat_toggle_sidebar"
@@ -1493,6 +1759,7 @@ classes = [
     OBJECT_PT_WoodyTool,
     VIEW3D_OT_CatSidebar,
     OBJECT_OT_CatAlign,
+    OBJECT_OT_CatSelectSamePivot,
     # OBJECT_PT_Spacing,
     # OBJECT_PT_Mirror_Modifier,
     # Add_Cylinder_6,
@@ -1517,6 +1784,11 @@ classes = [
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    for name, factory in EDIT_TRANSFORM_PROPERTIES.items():
+        setattr(bpy.types.Scene, name, factory())
+    for handlers in EDIT_RESET_HANDLERS:
+        if _reset_edit_transform_state not in handlers:
+            handlers.append(_reset_edit_transform_state)
     register_keymaps()
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
@@ -1527,6 +1799,12 @@ def unregister():
     if bpy.app.timers.is_registered(_activate_cat_tab_timer):
         bpy.app.timers.unregister(_activate_cat_tab_timer)
     unregister_keymaps()
+    for handlers in EDIT_RESET_HANDLERS:
+        if _reset_edit_transform_state in handlers:
+            handlers.remove(_reset_edit_transform_state)
+    for name in EDIT_TRANSFORM_PROPERTIES:
+        if hasattr(bpy.types.Scene, name):
+            delattr(bpy.types.Scene, name)
     for cls in classes:
         bpy.utils.unregister_class(cls)
 

@@ -11,14 +11,18 @@ CatTools는 CAT 블록 모델링 작업에 사용해 온 **Woody Tools**의 최�
 
 - N 키 사이드바 단축키: 사이드바를 열 때 CatTools 탭을 활성 탭으로 지정 (사이드바가 열린 상태로 저장된 파일도 파일 로드 시 CatTools 탭으로 복원). 탭 목록에서 Item·Tool·View는 Blender 내부에 정의되어 있어 CatTools를 그 위로 옮길 수는 없고, 활성 탭만 지정한다.
 - Transform 축약 필드: Loc·Rot·Sca를 각각 한 줄 3열 그리드로 표시하며, 사이드바가 좁아지면 라벨을 L·R·S로 축약
+- Edit 모드 Transform: 선택한 점·선·면의 중앙값 위치(월드)를 표시·편집하고, Rot·Sca는 중앙값 기준으로 선택 요소를 회전·스케일 (선택이 바뀌거나 Undo하면 0/1로 초기화)
+- 3D Cursor 축약 필드: View 탭의 3D 커서 Loc·Rot을 Transform과 같은 한 줄 3열 그리드로 표시 (쿼터니언/축-각도 모드는 4열)
+- Select X·Y·Z: 활성 오브젝트와 해당 축의 피벗(원점) 월드 좌표가 같은 오브젝트를 모두 선택 (Redo 패널에서 허용 오차·기존 선택 유지 조정)
+- Edit 모드 Select X·Y·Z: 현재 선택 모드(점·선·면)의 활성 요소(없으면 선택 중앙값)와 해당 축 월드 좌표가 같은 요소를 모두 선택
 - Align 축약 버튼: 활성 오브젝트를 기준으로 선택 오브젝트의 Loc·Rot·Sca를 X·Y·Z·All 축별 정렬
 - 기본 머티리얼 생성
 - 양면 텍스처 및 2·3·4 텍스처 셰이더 구성
 - Catoon 셀셰이딩 머티리얼: 텍스처 색감을 유지한 2톤 만화풍 그림자 (Shadow Color·Threshold·Softness 조절, Shader to RGB 기반이라 EEVEE 전용). Image Texture 노드에 흰색 기본 이미지가 들어가 있으므로, 여기에 사용할 텍스처를 지정한다.
 - 선택 오브젝트의 원형 배열
 - 래티스 생성 및 연결
-- X축은 왼쪽 영역을 보존하고 오른쪽 영역을 정리한 뒤 미러 모디파이어 추가
-- Y·Z축은 양수 영역을 보존하고 음수 영역을 정리한 뒤 미러 모디파이어 추가
+- -X·+X·-Y·+Y·-Z·+Z 버튼: 누른 부호 쪽 절반을 보존하고 반대쪽을 정리한 뒤 해당 축 미러 모디파이어 추가
+- 인자 없이 호출하면 기존처럼 X축은 음수 쪽, Y·Z축은 양수 쪽을 보존
 
 과거 스크립트에 있었지만 등록 목록에서 주석 처리된 실험 기능은 이번 버전에서도 노출하지 않습니다.
 
@@ -70,7 +74,7 @@ BLENDER_VERSION=5.3 BLENDER_BIN="/Applications/Blender 5.3.app/Contents/MacOS/Bl
 ./scripts/dev_run.sh --background --python tests/blender_dev_profile_smoke.py
 ```
 
-개발 프로필에 로드된 실제 CatTools로 X/Y/Z Mirror와 등록·해제를 확인하려면 다음 검사를 실행합니다.
+개발 프로필에 로드된 실제 CatTools로 ±X/±Y/±Z Mirror와 등록·해제를 확인하려면 다음 검사를 실행합니다.
 
 ```bash
 ./scripts/dev_run.sh --background --python tests/blender_mirror_smoke.py
@@ -80,6 +84,18 @@ Align 연산자의 축별 정렬과 비오일러 rotation_mode 처리를 확인�
 
 ```bash
 ./scripts/dev_run.sh --background --python tests/blender_align_smoke.py
+```
+
+Select의 같은 축 피벗 선택을 확인하려면 다음 검사를 실행합니다.
+
+```bash
+./scripts/dev_run.sh --background --python tests/blender_select_pivot_smoke.py
+```
+
+Edit 모드 선택 요소 Transform(위치·회전·스케일)을 확인하려면 다음 검사를 실행합니다.
+
+```bash
+./scripts/dev_run.sh --background --python tests/blender_edit_transform_smoke.py
 ```
 
 Catoon 셀셰이딩이 실제로 2톤으로 렌더링되는지 확인하려면 다음 검사를 실행합니다.
@@ -147,7 +163,7 @@ blender --background --factory-startup --python tests/blender_mirror_smoke.py
 blender --factory-startup --python-exit-code 1 --python tests/blender_sidebar_smoke.py
 ```
 
-검사는 Python 문법, Extension 매니페스트, 등록 클래스 순서, 기존 `bl_idname` 호환성과 X·Y·Z 미러 방향을 확인합니다. 첫 릴리스는 Blender 5.2 LTS에서 등록·해제와 등록 연산자 10개 실행을 검증했습니다.
+검사는 Python 문법, Extension 매니페스트, 등록 클래스 순서, 기존 `bl_idname` 호환성과 미러 연산자 축 구성을 확인합니다. 첫 릴리스는 Blender 5.2 LTS에서 등록·해제와 등록 연산자 10개 실행을 검증했습니다.
 
 ## 라이선스
 

@@ -31,6 +31,7 @@ EXPECTED_REGISTERED_CLASSES = [
     "OBJECT_PT_WoodyTool",
     "VIEW3D_OT_CatSidebar",
     "OBJECT_OT_CatAlign",
+    "OBJECT_OT_CatSelectSamePivot",
     "CircleArray",
     "Add_Material",
     "SHADER_OP_Blend2Tex",
@@ -49,6 +50,7 @@ EXPECTED_IDNAMES = {
     "OBJECT_PT_Spacing": "OBJECT_PT_spacing",
     "OBJECT_PT_Mirror_Modifier": "OBJECT_PT_Mirror_Modifier",
     "OBJECT_OT_CatAlign": "object.cat_align",
+    "OBJECT_OT_CatSelectSamePivot": "object.cat_select_same_pivot",
     "VIEW3D_OT_CatSidebar": "view3d.cat_toggle_sidebar",
     "Add_Cylinder_6": "wm.add_cylinder_6",
     "Add_Cylinder_8": "wm.add_cylinder_8",
@@ -122,7 +124,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], "1.0.0")
         self.assertEqual(manifest["id"], "cat_tools")
         self.assertEqual(manifest["name"], "CatTools")
-        self.assertEqual(manifest["version"], "1.2.0")
+        self.assertEqual(manifest["version"], "1.3.0")
         self.assertEqual(manifest["blender_version_min"], "4.2.0")
         self.assertIn("SPDX:GPL-3.0-or-later", manifest["license"])
 
@@ -135,7 +137,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         info = ast.literal_eval(info_node.value)
         self.assertEqual(info["name"], "CatTools")
-        self.assertEqual(info["version"], (1, 2, 0))
+        self.assertEqual(info["version"], (1, 3, 0))
         self.assertEqual(info["blender"], (4, 2, 0))
 
     def test_registered_class_order(self) -> None:
@@ -155,57 +157,40 @@ class CatToolsSmokeTest(unittest.TestCase):
         }
         self.assertEqual(actual, EXPECTED_IDNAMES)
 
-    def test_mirror_operators_preserve_expected_side(self) -> None:
+    def test_mirror_operators_share_axis_and_side(self) -> None:
+        expected_axis = {"x": 0, "y": 1, "z": 2}
         for class_name, axis in MIRROR_AXES.items():
             with self.subTest(axis=axis):
                 operator = self.classes[class_name]
-                execute = next(
-                    node
-                    for node in operator.body
-                    if isinstance(node, ast.FunctionDef) and node.name == "execute"
-                )
-                comparisons = {
-                    ast.unparse(node)
-                    for node in ast.walk(execute)
-                    if isinstance(node, ast.Compare)
-                }
-                if class_name == "Add_Mirror_X_Modifier":
-                    self.assertIn("0 < vertex.co.x < 0.01", comparisons)
-                    self.assertIn("vertex.co.x > 0.0", comparisons)
-                else:
-                    self.assertIn(f"-0.01 < vertex.co.{axis} < 0", comparisons)
-                    self.assertIn(f"vertex.co.{axis} < 0.0", comparisons)
+                base_names = [ast.unparse(base) for base in operator.bases]
+                self.assertIn("MirrorModifierOperator", base_names)
+                self.assertEqual(assignment_value(operator, "axis_index"), expected_axis[axis])
 
     def test_mirror_delete_is_guarded_when_side_is_empty(self) -> None:
-        for class_name in MIRROR_AXES:
-            with self.subTest(operator=class_name):
-                operator = self.classes[class_name]
-                execute = next(
-                    node
-                    for node in operator.body
-                    if isinstance(node, ast.FunctionDef) and node.name == "execute"
-                )
-                guard = next(
-                    node
-                    for node in ast.walk(execute)
-                    if isinstance(node, ast.If)
-                    and isinstance(node.test, ast.Name)
-                    and node.test.id == "vertices_to_delete"
-                )
-                delete_call = next(
-                    node
-                    for node in ast.walk(guard)
-                    if isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "delete"
-                )
-                geom_keyword = next(
-                    keyword
-                    for keyword in delete_call.keywords
-                    if keyword.arg == "geom"
-                )
-                self.assertIsInstance(geom_keyword.value, ast.Name)
-                self.assertEqual(geom_keyword.value.id, "vertices_to_delete")
+        apply_mirror = next(
+            node
+            for node in self.tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "apply_axis_mirror"
+        )
+        guard = next(
+            node
+            for node in ast.walk(apply_mirror)
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id == "vertices_to_delete"
+        )
+        delete_call = next(
+            node
+            for node in ast.walk(guard)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "delete"
+        )
+        geom_keyword = next(
+            keyword for keyword in delete_call.keywords if keyword.arg == "geom"
+        )
+        self.assertIsInstance(geom_keyword.value, ast.Name)
+        self.assertEqual(geom_keyword.value.id, "vertices_to_delete")
 
     def test_panel_branding(self) -> None:
         main_panel = self.classes["OBJECT_PT_WoodyTool"]
@@ -294,11 +279,13 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         # 라벨 칸은 비율 분할이 아닌 고정 폭이어야 사이드바를 넓혀도 여백이 벌어지지 않는다.
         self.assertNotIn("column.split(", source)
-        self.assertEqual(source.count("label_column.ui_units_x = label_units"), 2)
+        # Transform / 3D Cursor / Align 세 섹션이 같은 라벨 폭 규칙을 공유한다.
+        self.assertEqual(source.count("label_column.ui_units_x = label_units"), 3)
         self.assertEqual(
             source.count("label_column.label(text=short_label if compact else full_label)"),
-            2,
+            3,
         )
+        self.assertIn("fields.prop(cursor, property_name, index=index, text='')", source)
         self.assertIn("compact, label_units = transform_label_metrics(context)", source)
         self.assertIn("operator.mode = align_mode", source)
         self.assertIn("operator.axis = axis", source)

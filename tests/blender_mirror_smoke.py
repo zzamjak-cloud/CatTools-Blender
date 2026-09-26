@@ -97,11 +97,11 @@ def assert_mirror(obj, axis_index: int) -> None:
     )
 
 
-def run_operator(axis: str, values: list[float]) -> tuple[list[float], object]:
+def run_operator(axis: str, values: list[float], side: str | None = None) -> tuple[list[float], object]:
     axis_index = AXES[axis]
     obj = create_axis_object(axis_index, values)
     operator = getattr(bpy.ops.wm, f"add_mirror_{axis}_modifier")
-    result = operator()
+    result = operator() if side is None else operator(side=side)
     assert result == {"FINISHED"}, f"{axis.upper()} Mirror 실행 실패: {result}"
     assert_mirror(obj, axis_index)
     return axis_values(obj, axis_index), obj
@@ -119,21 +119,24 @@ def main() -> None:
     if registered_here:
         addon.register()
     try:
+        expected_by_side = {
+            "NEGATIVE": [-1.0, -0.005, 0.0],
+            "POSITIVE": [0.0, 0.005, 1.0],
+        }
+        # 인자 없는 기존 호출은 X는 음수 쪽, Y/Z는 양수 쪽을 남긴다.
+        legacy_side = {"x": "NEGATIVE", "y": "POSITIVE", "z": "POSITIVE"}
         for axis in AXES:
-            mixed_values, mixed_obj = run_operator(axis, [-1.0, -0.005, 0.005, 1.0])
-            expected_mixed_values = [-1.0, -0.005, 0.0] if axis == "x" else [0.0, 0.005, 1.0]
-            assert mixed_values == expected_mixed_values, (
-                f"{axis.upper()} 혼합 좌표 결과가 다릅니다: {mixed_values}"
-            )
-            remove_object(mixed_obj)
+            for side in (None, "NEGATIVE", "POSITIVE"):
+                expected = expected_by_side[side or legacy_side[axis]]
+                label = f"{axis.upper()}({side or 'default'})"
 
-            preserved_input = [0.0, -0.005, -1.0] if axis == "x" else [0.0, 0.005, 1.0]
-            preserved_values, preserved_obj = run_operator(axis, preserved_input)
-            expected_preserved_values = [-1.0, -0.005, 0.0] if axis == "x" else [0.0, 0.005, 1.0]
-            assert preserved_values == expected_preserved_values, (
-                f"{axis.upper()} 보존 좌표가 변경되었습니다: {preserved_values}"
-            )
-            remove_object(preserved_obj)
+                mixed_values, mixed_obj = run_operator(axis, [-1.0, -0.005, 0.005, 1.0], side)
+                assert mixed_values == expected, f"{label} 혼합 좌표 결과가 다릅니다: {mixed_values}"
+                remove_object(mixed_obj)
+
+                preserved_values, preserved_obj = run_operator(axis, list(reversed(expected)), side)
+                assert preserved_values == expected, f"{label} 보존 좌표가 변경되었습니다: {preserved_values}"
+                remove_object(preserved_obj)
 
         if not registered_here:
             verify_development_addon_toggle(addon)
@@ -142,7 +145,7 @@ def main() -> None:
         if registered_here:
             addon.unregister()
 
-    print("CatTools X/Y/Z Mirror Blender 스모크 테스트 통과")
+    print("CatTools ±X/±Y/±Z Mirror Blender 스모크 테스트 통과")
 
 
 if __name__ == "__main__":
