@@ -369,12 +369,17 @@ class OBJECT_PT_WoodyTool(Panel):
 
         layout.separator(factor=1)
 
-    # 선택: 활성 오브젝트와 같은 축 피벗(원점) 값을 가진 오브젝트를 모두 선택
+    # 선택: 기준과 같은 축 값(X·Y·Z), 또는 기준보다 양(+)/음(-) 방향에 있는 대상을 모두 선택
         layout.label(text="Select :", icon="RESTRICT_SELECT_OFF")
-        row = layout.row(align=True)
-        for axis in ('X', 'Y', 'Z'):
-            operator = row.operator(OBJECT_OT_CatSelectSamePivot.bl_idname, text=axis)
-            operator.axis = axis
+        column = layout.column(align=True)
+        for direction, prefix in (('SAME', ""), ('POSITIVE', "+"), ('NEGATIVE', "-")):
+            row = column.row(align=True)
+            for axis in ('X', 'Y', 'Z'):
+                operator = row.operator(
+                    OBJECT_OT_CatSelectSamePivot.bl_idname, text=f"{prefix}{axis}"
+                )
+                operator.axis = axis
+                operator.direction = direction
 
         layout.separator(factor=1)
 
@@ -1604,8 +1609,35 @@ def edit_element_center(element) -> Vector:
     return element.calc_center_median()
 
 
+# 선택 방향별 보고 문구
+SELECT_DIRECTION_LABELS = {'SAME': "같은", 'POSITIVE': "양(+) 방향에 있는", 'NEGATIVE': "음(-) 방향에 있는"}
+
+
+def select_axis_matches(
+    value: float, reference: float, direction: str, tolerance: float, distance: float = 0.0
+) -> bool:
+    """
+    축 좌표가 선택 방향 조건을 만족하는지 판정한다.
+
+    Args:
+        value: 비교할 대상의 축 좌표
+        reference: 기준 축 좌표
+        direction: 'SAME'(같은 값), 'POSITIVE'(기준 + distance 이상), 'NEGATIVE'(기준 - distance 이하)
+        tolerance: 허용 오차 (경계와 같은 위치의 대상은 선택에 포함된다)
+        distance: 양/음 방향 선택을 시작할 기준으로부터의 거리 (0이면 기준 자신도 포함)
+
+    Returns:
+        조건 만족 여부
+    """
+    if direction == 'POSITIVE':
+        return value >= reference + distance - tolerance
+    if direction == 'NEGATIVE':
+        return value <= reference - distance + tolerance
+    return abs(value - reference) <= tolerance
+
+
 class OBJECT_OT_CatSelectSamePivot(Operator):
-    """지정 축의 월드 좌표가 기준과 같은 오브젝트(Object 모드) 또는 점/선/면(Edit 모드)을 모두 선택합니다."""
+    """지정 축의 월드 좌표가 기준과 같거나 기준보다 +/- 방향에 있는 오브젝트(Object 모드) 또는 점/선/면(Edit 모드)을 모두 선택합니다."""
     bl_idname = "object.cat_select_same_pivot"
     bl_label = "Select Same Pivot"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1618,6 +1650,22 @@ class OBJECT_OT_CatSelectSamePivot(Operator):
             ('Z', "Z", "Z축 피벗이 같은 오브젝트 선택"),
         ],
         default='Z',
+    )
+    direction: EnumProperty(
+        name="Direction",
+        items=[
+            ('SAME', "Same", "기준과 축 값이 같은 대상 선택"),
+            ('POSITIVE', "+", "기준에서 Distance 이상 떨어진 축의 양(+) 방향 대상 모두 선택"),
+            ('NEGATIVE', "-", "기준에서 Distance 이상 떨어진 축의 음(-) 방향 대상 모두 선택"),
+        ],
+        default='SAME',
+    )
+    # 양/음 방향 선택의 시작 거리. 0보다 크게 주면 기준(자기 자신)을 제외할 수 있다.
+    distance: FloatProperty(
+        name="Distance",
+        description="기준으로부터 이 거리 이상 떨어진 대상부터 선택 (+/- 방향 선택에만 적용)",
+        default=0.0, min=0.0, soft_max=100.0,
+        precision=4, subtype='DISTANCE', unit='LENGTH',
     )
     # 모델링 중 생기는 부동소수 오차 때문에 완전 일치 비교는 쓰지 않는다.
     tolerance: FloatProperty(
@@ -1632,6 +1680,18 @@ class OBJECT_OT_CatSelectSamePivot(Operator):
             return True
         return context.mode == 'OBJECT' and context.active_object is not None
 
+    # 3D View 좌하단 Adjust Last Operation 패널: Distance는 +/- 방향 선택에서만 보여 준다.
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, "axis")
+        layout.prop(self, "direction")
+        if self.direction != 'SAME':
+            layout.prop(self, "distance")
+        layout.prop(self, "tolerance")
+        layout.prop(self, "extend")
+
     def execute(self, context) -> Set[str]:
         if context.mode == 'EDIT_MESH':
             return self.execute_edit_mesh(context)
@@ -1642,18 +1702,24 @@ class OBJECT_OT_CatSelectSamePivot(Operator):
 
         count = 0
         for obj in context.selectable_objects:
-            matched = abs(obj.matrix_world.translation[index] - reference) <= self.tolerance
+            matched = select_axis_matches(
+                obj.matrix_world.translation[index], reference,
+                self.direction, self.tolerance, self.distance,
+            )
             if matched:
                 obj.select_set(True)
                 count += 1
             elif not self.extend:
                 obj.select_set(False)
 
-        active_object.select_set(True)
-        self.report({'INFO'}, f"{self.axis}축 피벗이 같은 오브젝트 {count}개를 선택했습니다.")
+        # +/- 방향은 Distance로 기준 자신을 제외할 수 있어야 하므로 같은 값 선택에서만 기준을 강제 선택한다.
+        if self.direction == 'SAME':
+            active_object.select_set(True)
+        direction_label = SELECT_DIRECTION_LABELS[self.direction]
+        self.report({'INFO'}, f"{self.axis}축 피벗이 {direction_label} 오브젝트 {count}개를 선택했습니다.")
         return {'FINISHED'}
 
-    # Edit 모드: 현재 선택 모드(점/선/면)의 요소 중심 좌표를 축별로 비교해 같은 값을 가진 요소를 선택
+    # Edit 모드: 현재 선택 모드(점/선/면)의 요소 중심 좌표를 축별로 기준과 비교해 방향 조건에 맞는 요소를 선택
     def execute_edit_mesh(self, context) -> Set[str]:
         vert_mode, edge_mode, face_mode = context.tool_settings.mesh_select_mode
         element_kind = 'FACE' if face_mode else 'EDGE' if edge_mode else 'VERT'
@@ -1677,7 +1743,10 @@ class OBJECT_OT_CatSelectSamePivot(Operator):
             matrix = obj.matrix_world
             matched = [
                 e for e in elements
-                if abs((matrix @ edit_element_center(e))[index] - reference) <= self.tolerance
+                if select_axis_matches(
+                    (matrix @ edit_element_center(e))[index], reference,
+                    self.direction, self.tolerance, self.distance,
+                )
             ]
             if not self.extend:
                 for sequence in (bm.verts, bm.edges, bm.faces):
@@ -1690,7 +1759,8 @@ class OBJECT_OT_CatSelectSamePivot(Operator):
             count += len(matched)
 
         kind_label = {'VERT': "점", 'EDGE': "선", 'FACE': "면"}[element_kind]
-        self.report({'INFO'}, f"{self.axis}축 값이 같은 {kind_label} {count}개를 선택했습니다.")
+        direction_label = SELECT_DIRECTION_LABELS[self.direction]
+        self.report({'INFO'}, f"{self.axis}축 값이 {direction_label} {kind_label} {count}개를 선택했습니다.")
         return {'FINISHED'}
 
     @staticmethod

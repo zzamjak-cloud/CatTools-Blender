@@ -87,6 +87,37 @@ def check_edit_mesh_verts() -> None:
     assert bpy.ops.object.cat_select_same_pivot(axis="X") == {"FINISHED"}
     selected = [v for v in bm.verts if v.select]
     assert len(selected) == 3, f"X가 같은 점 3개가 선택돼야 합니다: {len(selected)}"
+
+    # 가운데 점을 기준으로 +X는 가운데·오른쪽 열(6개), -X는 가운데·왼쪽 열(6개)
+    for v in bm.verts:
+        v.select = False
+    center = min(bm.verts, key=lambda v: v.co.length)
+    center.select_set(True)
+    bm.select_history.clear()
+    bm.select_history.add(center)
+    bmesh.update_edit_mesh(obj.data)
+
+    assert bpy.ops.object.cat_select_same_pivot(axis="X", direction="POSITIVE") == {"FINISHED"}
+    selected = [v for v in bm.verts if v.select]
+    assert len(selected) == 6, f"+X 방향 점 6개가 선택돼야 합니다: {len(selected)}"
+    assert all(v.co.x >= -1e-6 for v in selected)
+
+    assert bpy.ops.object.cat_select_same_pivot(axis="X", direction="NEGATIVE") == {"FINISHED"}
+    selected = [v for v in bm.verts if v.select]
+    assert len(selected) == 6, f"-X 방향 점 6개가 선택돼야 합니다: {len(selected)}"
+    assert all(v.co.x <= 1e-6 for v in selected)
+
+    # Distance를 주면 기준 열(가운데)을 제외하고 오른쪽 열 3개만 선택된다.
+    for v in bm.verts:
+        v.select = False
+    center.select_set(True)
+    bm.select_history.clear()
+    bm.select_history.add(center)
+    bmesh.update_edit_mesh(obj.data)
+    assert bpy.ops.object.cat_select_same_pivot(axis="X", direction="POSITIVE", distance=0.5) == {"FINISHED"}
+    selected = [v for v in bm.verts if v.select]
+    assert len(selected) == 3, f"+X Distance 0.5 점 3개가 선택돼야 합니다: {len(selected)}"
+    assert not center.select, "Distance가 있으면 기준 점은 제외돼야 합니다."
     remove_all_objects()
 
 
@@ -115,6 +146,39 @@ def main() -> None:
 
         assert bpy.ops.object.cat_select_same_pivot(axis="Y", extend=True) == {"FINISHED"}
         assert selected_names() == {"TileA", "TileB", "Table"}, selected_names()
+
+        # 방향 선택: TileB(X=2) 기준 +X는 TileB·TileC, -X는 TileA·TileB·Table
+        tile_b = bpy.data.objects["TileB"]
+        bpy.ops.object.select_all(action="DESELECT")
+        tile_b.select_set(True)
+        bpy.context.view_layer.objects.active = tile_b
+        assert bpy.ops.object.cat_select_same_pivot(axis="X", direction="POSITIVE") == {"FINISHED"}
+        assert selected_names() == {"TileB", "TileC"}, selected_names()
+        assert bpy.ops.object.cat_select_same_pivot(axis="X", direction="NEGATIVE") == {"FINISHED"}
+        assert selected_names() == {"TileA", "TileB", "Table"}, selected_names()
+        # Z 방향은 허용 오차 안의 TileB(0.00001)를 기준과 같은 높이로 본다.
+        assert bpy.ops.object.cat_select_same_pivot(axis="Z", direction="POSITIVE") == {"FINISHED"}
+        assert selected_names() == {"TileA", "TileB", "TileC", "Table"}, selected_names()
+        bpy.context.view_layer.objects.active = bpy.data.objects["Table"]
+        assert bpy.ops.object.cat_select_same_pivot(axis="Z", direction="NEGATIVE") == {"FINISHED"}
+        assert selected_names() == {"TileA", "TileB", "TileC", "Table"}, selected_names()
+        assert bpy.ops.object.cat_select_same_pivot(axis="Z", direction="POSITIVE") == {"FINISHED"}
+        assert selected_names() == {"Table"}, selected_names()
+
+        # Distance: TileA(X=0) 기준 1 이상 떨어진 +X는 자신을 뺀 TileB·TileC, 3 이상이면 TileC만
+        tile_a = bpy.data.objects["TileA"]
+        bpy.context.view_layer.objects.active = tile_a
+        assert bpy.ops.object.cat_select_same_pivot(axis="X", direction="POSITIVE", distance=1.0) == {"FINISHED"}
+        assert selected_names() == {"TileB", "TileC"}, selected_names()
+        assert bpy.ops.object.cat_select_same_pivot(axis="X", direction="POSITIVE", distance=3.0) == {"FINISHED"}
+        assert selected_names() == {"TileC"}, selected_names()
+        # 경계 거리(2)에 정확히 있는 TileB는 포함된다.
+        assert bpy.ops.object.cat_select_same_pivot(axis="X", direction="POSITIVE", distance=2.0) == {"FINISHED"}
+        assert selected_names() == {"TileB", "TileC"}, selected_names()
+        # TileC(X=4) 기준 -X로 3 이상이면 TileA·Table만
+        bpy.context.view_layer.objects.active = bpy.data.objects["TileC"]
+        assert bpy.ops.object.cat_select_same_pivot(axis="X", direction="NEGATIVE", distance=3.0) == {"FINISHED"}
+        assert selected_names() == {"TileA", "Table"}, selected_names()
         remove_all_objects()
         check_edit_mesh_faces()
         check_edit_mesh_verts()
