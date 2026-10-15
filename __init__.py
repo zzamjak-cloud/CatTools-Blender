@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 6, 0),
+    "version": (1, 7, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -17,6 +17,7 @@ from typing import Set
 from bpy.types import Context, Panel, Operator
 from bpy.props import StringProperty, FloatProperty, BoolProperty, IntProperty, EnumProperty
 from mathutils import Euler, Matrix, Quaternion, Vector
+from mathutils.bvhtree import BVHTree
 
 # Transform / Align 행의 (기본 라벨, 축약 라벨, 대상) — 3x3 축약 그리드
 TRANSFORM_ROWS = (
@@ -381,7 +382,10 @@ class OBJECT_PT_WoodyTool(Panel):
                 operator.axis = axis
                 operator.direction = direction
         # 노멀 방향(면이 회전돼 있어도 같은 방향을 보는 면)이 같은 대상 선택
-        column.operator(OBJECT_OT_CatSelectSameNormal.bl_idname, text="Normal")
+        # 은면(어느 방향에서도 보이지 않는 면) 선택은 Edit 모드에서만 동작한다.
+        row = column.row(align=True)
+        row.operator(OBJECT_OT_CatSelectSameNormal.bl_idname, text="Normal")
+        row.operator(OBJECT_OT_CatSelectHiddenFaces.bl_idname, text="Hidden")
 
         layout.separator(factor=1)
 
@@ -1954,6 +1958,147 @@ class OBJECT_OT_CatSelectSameNormal(Operator):
         return total.normalized()
 
 
+def fibonacci_sphere_directions(count: int):
+    """구 위에 고르게 퍼진 단위 방향 벡터 count개를 만든다."""
+    golden_angle = math.pi * (3.0 - math.sqrt(5.0))
+    directions = []
+    for i in range(count):
+        z = 1.0 - 2.0 * (i + 0.5) / count
+        radius = math.sqrt(max(0.0, 1.0 - z * z))
+        theta = golden_angle * i
+        directions.append(Vector((math.cos(theta) * radius, math.sin(theta) * radius, z)))
+    return directions
+
+
+def build_world_bvh(context, edit_meshes, include_others: bool):
+    """
+    가림 판정용 월드 좌표 BVHTree를 만든다.
+
+    Args:
+        context: 현재 컨텍스트
+        edit_meshes: (오브젝트, bmesh) 목록. 편집 중인 현재 형상을 그대로 쓴다.
+        include_others: 보이는 다른 메쉬 오브젝트(모디파이어 적용 결과)도 가림체로 포함할지 여부
+    """
+    vertices = []
+    polygons = []
+
+    def add(matrix, coords, faces):
+        offset = len(vertices)
+        vertices.extend(matrix @ co for co in coords)
+        polygons.extend([offset + index for index in face] for face in faces)
+
+    # H로 숨긴 면도 실제 형상이므로 가림체에 포함한다.
+    for obj, bm in edit_meshes:
+        bm.verts.index_update()
+        add(
+            obj.matrix_world,
+            [v.co for v in bm.verts],
+            [[v.index for v in f.verts] for f in bm.faces],
+        )
+
+    if include_others:
+        edit_objects = {obj for obj, _bm in edit_meshes}
+        depsgraph = context.evaluated_depsgraph_get()
+        for obj in context.visible_objects:
+            if obj.type != 'MESH' or obj in edit_objects:
+                continue
+            evaluated = obj.evaluated_get(depsgraph)
+            mesh = evaluated.to_mesh()
+            try:
+                add(
+                    evaluated.matrix_world,
+                    [v.co for v in mesh.vertices],
+                    [list(p.vertices) for p in mesh.polygons],
+                )
+            finally:
+                evaluated.to_mesh_clear()
+
+    if not polygons:
+        return None
+    return BVHTree.FromPolygons(vertices, polygons)
+
+
+class OBJECT_OT_CatSelectHiddenFaces(Operator):
+    """어느 방향에서도 보이지 않는 은면(다른 면에 완전히 가려진 면)을 선택합니다. 삭제는 하지 않습니다."""
+    bl_idname = "object.cat_select_hidden_faces"
+    bl_label = "Select Hidden Faces"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    # 면마다 바깥쪽 반구로 쏘는 광선 방향 수(구 전체 기준). 많을수록 정확하지만 느리다.
+    samples: IntProperty(
+        name="Samples",
+        description="가림 판정에 쓰는 광선 방향 수 (구 전체 기준, 면마다 바깥쪽 절반만 사용)",
+        default=64, min=8, soft_max=256, max=1024,
+    )
+    include_others: BoolProperty(
+        name="Other Objects",
+        description="보이는 다른 메쉬 오브젝트에 가려진 면도 은면으로 판정",
+        default=True,
+    )
+    extend: BoolProperty(name="Extend", description="기존 선택을 유지한 채 추가 선택", default=False)
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'EDIT_MESH'
+
+    def execute(self, context) -> Set[str]:
+        objects = getattr(context, "objects_in_mode_unique_data", None) or [context.edit_object]
+        edit_meshes = [
+            (obj, bmesh.from_edit_mesh(obj.data))
+            for obj in objects
+            if obj is not None and obj.type == 'MESH'
+        ]
+        bvh = build_world_bvh(context, edit_meshes, self.include_others)
+        if bvh is None:
+            self.report({'WARNING'}, "검사할 면이 없습니다.")
+            return {'CANCELLED'}
+
+        directions = fibonacci_sphere_directions(self.samples)
+        # 광선 시작점을 면에서 살짝 띄워 자기 면이나 맞닿은 면에 바로 맞는 것을 막는다.
+        offset = 1e-4
+        # 결과를 볼 수 있도록 면 선택 모드로 바꾼다.
+        context.tool_settings.mesh_select_mode = (False, False, True)
+
+        count = 0
+        for obj, bm in edit_meshes:
+            matrix = obj.matrix_world
+            hidden = []
+            for face in bm.faces:
+                if face.hide:
+                    continue
+                normal = world_normal(matrix, face.normal)
+                if normal.length <= 1e-9:
+                    continue
+                if self.face_is_hidden(bvh, matrix, face, normal, directions, offset):
+                    hidden.append(face)
+            if not self.extend:
+                for sequence in (bm.verts, bm.edges, bm.faces):
+                    for element in sequence:
+                        element.select = False
+            for face in hidden:
+                face.select_set(True)
+            bm.select_flush_mode()
+            bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+            count += len(hidden)
+
+        self.report({'INFO'}, f"보이지 않는 은면 {count}개를 선택했습니다. 확인 후 직접 삭제하세요.")
+        return {'FINISHED'}
+
+    @staticmethod
+    def face_is_hidden(bvh, matrix, face, normal, directions, offset) -> bool:
+        # 면 중심과 각 꼭짓점 쪽 안쪽 지점에서, 바깥쪽 반구로 쏜 광선이 하나라도 빠져나가면 보이는 면이다.
+        center = matrix @ face.calc_center_median()
+        points = [center] + [center.lerp(matrix @ v.co, 0.9) for v in face.verts]
+        for point in points:
+            origin = point + normal * offset
+            for direction in directions:
+                if direction.dot(normal) <= 0.01:
+                    continue
+                if bvh.ray_cast(origin, direction)[0] is None:
+                    return False
+        return True
+
+
 class VIEW3D_OT_CatSidebar(Operator):
     """사이드바를 토글하고, 열 때 CatTools 탭을 활성화합니다."""
     bl_idname = "view3d.cat_toggle_sidebar"
@@ -2002,6 +2147,7 @@ classes = [
     OBJECT_OT_CatAlign,
     OBJECT_OT_CatSelectSamePivot,
     OBJECT_OT_CatSelectSameNormal,
+    OBJECT_OT_CatSelectHiddenFaces,
     # OBJECT_PT_Spacing,
     # OBJECT_PT_Mirror_Modifier,
     # Add_Cylinder_6,

@@ -33,6 +33,7 @@ EXPECTED_REGISTERED_CLASSES = [
     "OBJECT_OT_CatAlign",
     "OBJECT_OT_CatSelectSamePivot",
     "OBJECT_OT_CatSelectSameNormal",
+    "OBJECT_OT_CatSelectHiddenFaces",
     "CircleArray",
     "Add_Material",
     "SHADER_OP_Blend2Tex",
@@ -53,6 +54,7 @@ EXPECTED_IDNAMES = {
     "OBJECT_OT_CatAlign": "object.cat_align",
     "OBJECT_OT_CatSelectSamePivot": "object.cat_select_same_pivot",
     "OBJECT_OT_CatSelectSameNormal": "object.cat_select_same_normal",
+    "OBJECT_OT_CatSelectHiddenFaces": "object.cat_select_hidden_faces",
     "VIEW3D_OT_CatSidebar": "view3d.cat_toggle_sidebar",
     "Add_Cylinder_6": "wm.add_cylinder_6",
     "Add_Cylinder_8": "wm.add_cylinder_8",
@@ -126,7 +128,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], "1.0.0")
         self.assertEqual(manifest["id"], "cat_tools")
         self.assertEqual(manifest["name"], "CatTools")
-        self.assertEqual(manifest["version"], "1.6.0")
+        self.assertEqual(manifest["version"], "1.7.0")
         self.assertEqual(manifest["blender_version_min"], "4.2.0")
         self.assertIn("SPDX:GPL-3.0-or-later", manifest["license"])
 
@@ -139,7 +141,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         info = ast.literal_eval(info_node.value)
         self.assertEqual(info["name"], "CatTools")
-        self.assertEqual(info["version"], (1, 6, 0))
+        self.assertEqual(info["version"], (1, 7, 0))
         self.assertEqual(info["blender"], (4, 2, 0))
 
     def test_registered_class_order(self) -> None:
