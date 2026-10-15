@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import math
 from pathlib import Path
 
 import bmesh
 import bpy
+from mathutils import Euler, Matrix, Vector
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -121,6 +123,84 @@ def check_edit_mesh_verts() -> None:
     remove_all_objects()
 
 
+def check_edit_mesh_normals() -> None:
+    # 같은 방향으로 회전된 큐브 두 개를 한 메쉬에 만들고, 오브젝트에도 회전·비균등 스케일을 준다.
+    rotation = Euler((0.3, 0.5, 0.7)).to_matrix().to_4x4()
+    bm_source = bmesh.new()
+    for offset in (Vector((-2.0, 0.0, 0.0)), Vector((2.0, 0.0, 0.0))):
+        bmesh.ops.create_cube(bm_source, size=1.0, matrix=Matrix.Translation(offset) @ rotation)
+    mesh = bpy.data.meshes.new("NormalCubes")
+    bm_source.to_mesh(mesh)
+    bm_source.free()
+    obj = bpy.data.objects.new("NormalCubes", mesh)
+    obj.rotation_euler = (0.2, 0.0, 1.1)
+    obj.scale = (1.0, 2.0, 0.5)
+    bpy.context.collection.objects.link(obj)
+    bpy.ops.object.select_all(action="DESELECT")
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.context.tool_settings.mesh_select_mode = (False, False, True)
+
+    bm = bmesh.from_edit_mesh(obj.data)
+    for element in (*bm.verts, *bm.edges, *bm.faces):
+        element.select = False
+    bm.faces.ensure_lookup_table()
+    face = bm.faces[0]
+    face.select_set(True)
+    bm.select_history.add(face)
+    bmesh.update_edit_mesh(obj.data)
+
+    assert bpy.ops.object.cat_select_same_normal() == {"FINISHED"}
+    selected = [f for f in bm.faces if f.select]
+    assert len(selected) == 2, f"노멀이 같은 면 2개가 선택돼야 합니다: {len(selected)}"
+    assert all(f.normal.angle(face.normal) < 1e-4 for f in selected)
+
+    # Extend로 반대쪽 면 기준을 더하면 4개, 각도를 179도로 주면 정반대(평행) 면만 빠진다.
+    # 비균등 스케일 때문에 월드 공간의 이웃 면은 정확히 90도가 아니다.
+    opposite = next(f for f in bm.faces if f.normal.dot(face.normal) < -0.99)
+    bm.select_history.clear()
+    opposite.select_set(True)
+    bm.select_history.add(opposite)
+    assert bpy.ops.object.cat_select_same_normal(extend=True) == {"FINISHED"}
+    assert sum(f.select for f in bm.faces) == 4
+
+    for f in bm.faces:
+        f.select = False
+    face.select_set(True)
+    bm.select_history.clear()
+    bm.select_history.add(face)
+    assert bpy.ops.object.cat_select_same_normal(angle=math.radians(179.0)) == {"FINISHED"}
+    assert sum(f.select for f in bm.faces) == 10, "반대쪽 면을 뺀 10개가 선택돼야 합니다."
+
+    # 기준이 없으면 취소된다.
+    for f in bm.faces:
+        f.select = False
+    bm.select_history.clear()
+    bmesh.update_edit_mesh(obj.data)
+    assert bpy.ops.object.cat_select_same_normal() == {"CANCELLED"}
+    remove_all_objects()
+
+
+def check_object_rotation() -> None:
+    a = create_empty("RotA", (0.0, 0.0, 0.0))
+    b = create_empty("RotB", (3.0, 0.0, 0.0))
+    c = create_empty("RotC", (6.0, 0.0, 0.0))
+    a.rotation_euler = (0.0, 0.0, math.radians(30.0))
+    b.rotation_euler = (0.0, 0.0, math.radians(30.0))
+    b.scale = (2.0, 1.0, 1.0)  # 스케일은 회전 비교에 영향을 주지 않는다.
+    c.rotation_euler = (0.0, 0.0, math.radians(45.0))
+    bpy.context.view_layer.update()
+    bpy.ops.object.select_all(action="DESELECT")
+    a.select_set(True)
+    bpy.context.view_layer.objects.active = a
+    assert bpy.ops.object.cat_select_same_normal() == {"FINISHED"}
+    assert selected_names() == {"RotA", "RotB"}, selected_names()
+    assert bpy.ops.object.cat_select_same_normal(angle=math.radians(20.0)) == {"FINISHED"}
+    assert selected_names() == {"RotA", "RotB", "RotC"}, selected_names()
+    remove_all_objects()
+
+
 def main() -> None:
     addon, registered_here = load_addon()
     remove_all_objects()
@@ -182,12 +262,14 @@ def main() -> None:
         remove_all_objects()
         check_edit_mesh_faces()
         check_edit_mesh_verts()
+        check_edit_mesh_normals()
+        check_object_rotation()
     finally:
         remove_all_objects()
         if registered_here:
             addon.unregister()
 
-    print("CatTools Select Same Pivot Blender 스모크 테스트 통과")
+    print("CatTools Select Same Pivot/Normal Blender 스모크 테스트 통과")
 
 
 if __name__ == "__main__":

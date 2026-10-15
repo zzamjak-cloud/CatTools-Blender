@@ -16,6 +16,7 @@ CatTools는 CAT 블록 모델링 작업에 사용해 온 **Woody Tools**의 최�
 - Select X·Y·Z: 활성 오브젝트와 해당 축의 피벗(원점) 월드 좌표가 같은 오브젝트를 모두 선택 (Redo 패널에서 허용 오차·기존 선택 유지 조정)
 - Edit 모드 Select X·Y·Z: 현재 선택 모드(점·선·면)의 활성 요소(없으면 선택 중앙값)와 해당 축 월드 좌표가 같은 요소를 모두 선택
 - Select +X·+Y·+Z / -X·-Y·-Z: 기준(활성 오브젝트 피벗, Edit 모드는 활성 요소 또는 선택 중앙값)을 포함해 해당 축의 양(+)·음(-) 방향에 있는 오브젝트·점·선·면을 모두 선택. 실행 후 3D View 좌하단 Adjust Last Operation 패널의 Distance로 기준에서 얼마나 떨어진 곳부터 선택할지 조절 (0보다 크면 기준 자신은 제외)
+- Select Normal: Edit 모드에서 활성 요소(없으면 선택 요소 평균)와 월드 노멀 방향이 같은 면·선·점을 모두 선택. 면이 축에 맞지 않게 회전돼 있어도 같은 방향을 보는 면을 고를 수 있고, Adjust Last Operation 패널의 Angle(기본 1°)로 허용 각도를 조절. Object 모드에서는 활성 오브젝트와 월드 회전이 같은 오브젝트를 선택
 - Align 축약 버튼: 활성 오브젝트를 기준으로 선택 오브젝트의 Loc·Rot·Sca를 X·Y·Z·All 축별 정렬
 - 기본 머티리얼 생성
 - 양면 텍스처 및 2·3·4 텍스처 셰이더 구성
@@ -87,7 +88,7 @@ Align 연산자의 축별 정렬과 비오일러 rotation_mode 처리를 확인�
 ./scripts/dev_run.sh --background --python tests/blender_align_smoke.py
 ```
 
-Select의 같은 축 피벗 선택을 확인하려면 다음 검사를 실행합니다.
+Select의 같은 축 피벗·같은 노멀 선택을 확인하려면 다음 검사를 실행합니다.
 
 ```bash
 ./scripts/dev_run.sh --background --python tests/blender_select_pivot_smoke.py

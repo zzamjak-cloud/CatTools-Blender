@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 3, 0),
+    "version": (1, 5, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -380,6 +380,8 @@ class OBJECT_PT_WoodyTool(Panel):
                 )
                 operator.axis = axis
                 operator.direction = direction
+        # 노멀 방향(면이 회전돼 있어도 같은 방향을 보는 면)이 같은 대상 선택
+        column.operator(OBJECT_OT_CatSelectSameNormal.bl_idname, text="Normal")
 
         layout.separator(factor=1)
 
@@ -1783,6 +1785,135 @@ class OBJECT_OT_CatSelectSamePivot(Operator):
         return sum(centers) / len(centers) if centers else None
 
 
+def edit_element_normal(element) -> Vector:
+    """요소의 로컬 노멀: 점·면은 자체 노멀, 선은 인접 면 노멀(없으면 양 끝 점 노멀)의 평균."""
+    if isinstance(element, bmesh.types.BMEdge):
+        normals = [face.normal for face in element.link_faces] or [vert.normal for vert in element.verts]
+        return sum(normals, Vector()) / len(normals)
+    return element.normal
+
+
+def world_normal(matrix: Matrix, normal: Vector) -> Vector:
+    """
+    로컬 노멀을 월드 방향으로 변환한다.
+
+    비균등 스케일이 있어도 면에 수직인 방향을 유지하도록 역전치 행렬을 쓴다.
+    길이가 0인 노멀은 그대로 0 벡터를 돌려준다.
+    """
+    result = matrix.to_3x3().inverted_safe().transposed() @ normal
+    if result.length > 1e-9:
+        result.normalize()
+    return result
+
+
+class OBJECT_OT_CatSelectSameNormal(Operator):
+    """기준과 노멀 방향이 같은 면·선·점(Edit 모드) 또는 월드 회전이 같은 오브젝트(Object 모드)를 모두 선택합니다."""
+    bl_idname = "object.cat_select_same_normal"
+    bl_label = "Select Same Normal"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    # 노멀(또는 회전) 사이 각도가 이 값 이하이면 같은 방향으로 본다.
+    angle: FloatProperty(
+        name="Angle",
+        description="기준과 같은 방향으로 볼 최대 각도 차이",
+        default=math.radians(1.0), min=0.0, max=math.pi,
+        precision=2, subtype='ANGLE',
+    )
+    extend: BoolProperty(name="Extend", description="기존 선택을 유지한 채 추가 선택", default=False)
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode == 'EDIT_MESH':
+            return True
+        return context.mode == 'OBJECT' and context.active_object is not None
+
+    def execute(self, context) -> Set[str]:
+        if context.mode == 'EDIT_MESH':
+            return self.execute_edit_mesh(context)
+        active_object = context.active_object
+        # 스케일을 제외한 월드 회전끼리 비교해 부모 회전까지 반영한다.
+        reference = active_object.matrix_world.to_quaternion()
+
+        count = 0
+        for obj in context.selectable_objects:
+            difference = reference.rotation_difference(obj.matrix_world.to_quaternion()).angle
+            # 쿼터니언 각도는 0~2π 범위라 반대쪽으로 가까운 경우도 같은 회전으로 본다.
+            if min(difference, 2 * math.pi - difference) <= self.angle:
+                obj.select_set(True)
+                count += 1
+            elif not self.extend:
+                obj.select_set(False)
+
+        active_object.select_set(True)
+        self.report({'INFO'}, f"월드 회전이 같은 오브젝트 {count}개를 선택했습니다.")
+        return {'FINISHED'}
+
+    # Edit 모드: 현재 선택 모드(점/선/면)의 월드 노멀을 기준 노멀과 각도로 비교해 같은 방향 요소를 선택
+    def execute_edit_mesh(self, context) -> Set[str]:
+        vert_mode, edge_mode, face_mode = context.tool_settings.mesh_select_mode
+        element_kind = 'FACE' if face_mode else 'EDGE' if edge_mode else 'VERT'
+
+        objects = getattr(context, "objects_in_mode_unique_data", None) or [context.edit_object]
+        meshes = []
+        for obj in objects:
+            if obj is None or obj.type != 'MESH':
+                continue
+            bm = bmesh.from_edit_mesh(obj.data)
+            meshes.append((obj, bm, [e for e in edit_elements(bm, element_kind) if not e.hide]))
+
+        reference = self.edit_reference(context, meshes, element_kind)
+        if reference is None:
+            self.report({'WARNING'}, "노멀 방향의 기준이 될 점, 선, 면을 선택하세요.")
+            return {'CANCELLED'}
+
+        # 각도 비교를 내적 비교로 바꿔 요소마다 acos를 계산하지 않는다.
+        min_dot = math.cos(self.angle)
+        count = 0
+        for obj, bm, elements in meshes:
+            matrix = obj.matrix_world
+            matched = []
+            for e in elements:
+                normal = world_normal(matrix, edit_element_normal(e))
+                # 노멀이 없는(퇴화) 요소는 방향을 정할 수 없으므로 제외한다.
+                if normal.length > 1e-9 and normal.dot(reference) >= min_dot - 1e-6:
+                    matched.append(e)
+            if not self.extend:
+                for sequence in (bm.verts, bm.edges, bm.faces):
+                    for element in sequence:
+                        element.select = False
+            for element in matched:
+                element.select_set(True)
+            bm.select_flush_mode()
+            bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+            count += len(matched)
+
+        kind_label = {'VERT': "점", 'EDGE': "선", 'FACE': "면"}[element_kind]
+        self.report({'INFO'}, f"노멀 방향이 같은 {kind_label} {count}개를 선택했습니다.")
+        return {'FINISHED'}
+
+    @staticmethod
+    def edit_reference(context, meshes, element_kind):
+        # 활성 요소(마지막으로 클릭한 요소)의 노멀을 우선 기준으로 삼고, 없으면 선택 요소 노멀의 평균을 쓴다.
+        element_type = EDIT_ELEMENT_TYPES[element_kind]
+        for obj, bm, _elements in meshes:
+            if obj != context.edit_object:
+                continue
+            active = bm.select_history.active
+            if isinstance(active, element_type) and active.select:
+                normal = world_normal(obj.matrix_world, edit_element_normal(active))
+                if normal.length > 1e-9:
+                    return normal
+
+        total = Vector()
+        for obj, _bm, elements in meshes:
+            for e in elements:
+                if e.select:
+                    total += world_normal(obj.matrix_world, edit_element_normal(e))
+        if total.length <= 1e-9:
+            return None
+        return total.normalized()
+
+
 class VIEW3D_OT_CatSidebar(Operator):
     """사이드바를 토글하고, 열 때 CatTools 탭을 활성화합니다."""
     bl_idname = "view3d.cat_toggle_sidebar"
@@ -1830,6 +1961,7 @@ classes = [
     VIEW3D_OT_CatSidebar,
     OBJECT_OT_CatAlign,
     OBJECT_OT_CatSelectSamePivot,
+    OBJECT_OT_CatSelectSameNormal,
     # OBJECT_PT_Spacing,
     # OBJECT_PT_Mirror_Modifier,
     # Add_Cylinder_6,
