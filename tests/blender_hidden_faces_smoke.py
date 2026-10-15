@@ -108,6 +108,32 @@ def check_other_objects_and_partial() -> None:
     remove_all_objects()
 
 
+def check_partially_buried_column() -> None:
+    # 굴뚝처럼 몸체를 뚫고 올라와 위끝이 캡에 묻힌 기둥: 옆면 중심(z=0.45)과 양 끝 근처는 가려져도
+    # 몸체 윗면(z=1)과 캡 아랫면(z=1.3) 사이 구간이 보이므로 옆면은 은면이 아니다.
+    bm_source = bmesh.new()
+    bmesh.ops.create_cube(bm_source, size=2.0)
+    column = Matrix.Translation((0.0, 0.0, 0.45)) @ Matrix.Diagonal((0.5, 0.5, 1.9, 1.0))
+    bmesh.ops.create_cube(bm_source, size=1.0, matrix=column)
+    cap = Matrix.Translation((0.0, 0.0, 1.45)) @ Matrix.Diagonal((1.0, 1.0, 0.3, 1.0))
+    bmesh.ops.create_cube(bm_source, size=1.0, matrix=cap)
+    mesh = bpy.data.meshes.new("Chimney")
+    bm_source.to_mesh(mesh)
+    bm_source.free()
+    obj = bpy.data.objects.new("Chimney", mesh)
+    bpy.context.collection.objects.link(obj)
+
+    bm = enter_edit(obj)
+    assert bpy.ops.object.cat_select_hidden_faces() == {"FINISHED"}
+    column_sides = [
+        f for f in bm.faces
+        if abs(f.normal.z) < 1e-6 and abs(f.calc_center_median().z - 0.45) < 1e-6
+    ]
+    assert len(column_sides) == 4, len(column_sides)
+    assert not any(f.select for f in column_sides), "일부가 드러난 기둥 옆면은 선택되지 않아야 합니다."
+    remove_all_objects()
+
+
 def check_performance() -> None:
     # 블록 10x10x2 격자(맞닿은 면 다수)도 실용적인 시간 안에 끝나야 한다.
     cubes = [((x * 1.0, y * 1.0, z * 1.0), 1.0) for x in range(10) for y in range(10) for z in range(2)]
@@ -132,6 +158,7 @@ def main() -> None:
         check_touching_blocks()
         check_enclosed_cube()
         check_other_objects_and_partial()
+        check_partially_buried_column()
         check_performance()
     finally:
         remove_all_objects()

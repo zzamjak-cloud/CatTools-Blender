@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 7, 0),
+    "version": (1, 7, 1),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -18,6 +18,7 @@ from bpy.types import Context, Panel, Operator
 from bpy.props import StringProperty, FloatProperty, BoolProperty, IntProperty, EnumProperty
 from mathutils import Euler, Matrix, Quaternion, Vector
 from mathutils.bvhtree import BVHTree
+from mathutils.geometry import tessellate_polygon
 
 # Transform / Align 행의 (기본 라벨, 축약 라벨, 대상) — 3x3 축약 그리드
 TRANSFORM_ROWS = (
@@ -2018,6 +2019,24 @@ def build_world_bvh(context, edit_meshes, include_others: bool):
     return BVHTree.FromPolygons(vertices, polygons)
 
 
+def face_sample_points(matrix, face, resolution: int):
+    """
+    면 위에 고르게 퍼진 월드 좌표 검사 지점을 만든다.
+
+    면 중심을 먼저 돌려주고, 이어서 면을 삼각형으로 나눠 각 삼각형을 resolution 격자로 쪼갠
+    작은 삼각형들의 무게중심을 돌려준다. 모든 지점이 면 안쪽에 있다.
+    """
+    coords = [matrix @ v.co for v in face.verts]
+    yield matrix @ face.calc_center_median()
+    for a, b, c in tessellate_polygon([coords]):
+        pa, pb, pc = coords[a], coords[b], coords[c]
+        for i in range(resolution):
+            for j in range(resolution - i):
+                u = (i + 1.0 / 3.0) / resolution
+                v = (j + 1.0 / 3.0) / resolution
+                yield pa + (pb - pa) * u + (pc - pa) * v
+
+
 class OBJECT_OT_CatSelectHiddenFaces(Operator):
     """어느 방향에서도 보이지 않는 은면(다른 면에 완전히 가려진 면)을 선택합니다. 삭제는 하지 않습니다."""
     bl_idname = "object.cat_select_hidden_faces"
@@ -2029,6 +2048,12 @@ class OBJECT_OT_CatSelectHiddenFaces(Operator):
         name="Samples",
         description="가림 판정에 쓰는 광선 방향 수 (구 전체 기준, 면마다 바깥쪽 절반만 사용)",
         default=64, min=8, soft_max=256, max=1024,
+    )
+    # 면 위 검사 지점 밀도: 삼각형마다 변을 이 수로 나눈 격자의 내부 지점을 쓴다.
+    face_samples: IntProperty(
+        name="Face Samples",
+        description="면 위 검사 지점 밀도 (클수록 면의 좁은 일부만 보이는 경우도 잡지만 느려진다)",
+        default=4, min=1, soft_max=8, max=16,
     )
     include_others: BoolProperty(
         name="Other Objects",
@@ -2069,7 +2094,7 @@ class OBJECT_OT_CatSelectHiddenFaces(Operator):
                 normal = world_normal(matrix, face.normal)
                 if normal.length <= 1e-9:
                     continue
-                if self.face_is_hidden(bvh, matrix, face, normal, directions, offset):
+                if self.face_is_hidden(bvh, matrix, face, normal, directions, offset, self.face_samples):
                     hidden.append(face)
             if not self.extend:
                 for sequence in (bm.verts, bm.edges, bm.faces):
@@ -2085,15 +2110,13 @@ class OBJECT_OT_CatSelectHiddenFaces(Operator):
         return {'FINISHED'}
 
     @staticmethod
-    def face_is_hidden(bvh, matrix, face, normal, directions, offset) -> bool:
-        # 면 중심과 각 꼭짓점 쪽 안쪽 지점에서, 바깥쪽 반구로 쏜 광선이 하나라도 빠져나가면 보이는 면이다.
-        center = matrix @ face.calc_center_median()
-        points = [center] + [center.lerp(matrix @ v.co, 0.9) for v in face.verts]
-        for point in points:
+    def face_is_hidden(bvh, matrix, face, normal, directions, offset, resolution) -> bool:
+        # 면 위에 고르게 깐 지점들에서 바깥쪽 반구로 쏜 광선이 하나라도 빠져나가면 보이는 면이다.
+        # 일부만 드러난 길쭉한 면(지붕을 뚫고 나온 굴뚝 옆면 등)도 놓치지 않도록 면 전체를 표본으로 쓴다.
+        outward = [d for d in directions if d.dot(normal) > 0.01]
+        for point in face_sample_points(matrix, face, resolution):
             origin = point + normal * offset
-            for direction in directions:
-                if direction.dot(normal) <= 0.01:
-                    continue
+            for direction in outward:
                 if bvh.ray_cast(origin, direction)[0] is None:
                     return False
         return True
