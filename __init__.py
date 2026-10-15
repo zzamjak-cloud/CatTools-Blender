@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 8, 0),
+    "version": (1, 8, 1),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -1616,6 +1616,9 @@ def edit_element_center(element) -> Vector:
     return element.calc_center_median()
 
 
+# 면 모드 같은 값 선택에서 노멀 방향을 같다고 볼 최대 각도(1도)의 코사인
+SELECT_NORMAL_MATCH_COS = math.cos(math.radians(1.0))
+
 # 선택 방향별 보고 문구
 SELECT_DIRECTION_LABELS = {'SAME': "같은", 'POSITIVE': "양(+) 방향에 있는", 'NEGATIVE': "음(-) 방향에 있는"}
 
@@ -1704,6 +1707,12 @@ class OBJECT_OT_CatSelectSamePivot(Operator):
         name="Tolerance", default=0.0001, min=0.0, soft_max=0.1,
         precision=4, subtype='DISTANCE', unit='LENGTH',
     )
+    # 면 모드의 같은 값 선택에서 축 값뿐 아니라 노멀 방향까지 같은 면만 고른다.
+    match_normal: BoolProperty(
+        name="Match Normal",
+        description="면 모드 X·Y·Z 선택에서 기준 면과 노멀 방향도 같은 면만 선택",
+        default=True,
+    )
     extend: BoolProperty(name="Extend", description="기존 선택을 유지한 채 추가 선택", default=False)
 
     @classmethod
@@ -1712,7 +1721,8 @@ class OBJECT_OT_CatSelectSamePivot(Operator):
             return True
         return context.mode == 'OBJECT' and context.active_object is not None
 
-    # 3D View 좌하단 Adjust Last Operation 패널: Distance는 +/- 방향 선택에서만 보여 준다.
+    # 3D View 좌하단 Adjust Last Operation 패널: Distance는 +/- 방향 선택에서만,
+    # Match Normal은 면 모드의 같은 값 선택에서만 보여 준다.
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
@@ -1722,6 +1732,8 @@ class OBJECT_OT_CatSelectSamePivot(Operator):
         if self.direction != 'SAME':
             layout.prop(self, "distance")
         layout.prop(self, "tolerance")
+        if self.direction == 'SAME' and context.mode == 'EDIT_MESH' and context.tool_settings.mesh_select_mode[2]:
+            layout.prop(self, "match_normal")
         layout.prop(self, "extend")
 
     def execute(self, context) -> Set[str]:
@@ -1769,17 +1781,31 @@ class OBJECT_OT_CatSelectSamePivot(Operator):
         if not references:
             self.report({'WARNING'}, "기준이 될 점, 선, 면을 선택하세요.")
             return {'CANCELLED'}
+        # 면 모드 같은 값 선택: 축 값이 같아도 다른 방향을 보는 면(옆면 등)은 제외한다.
+        use_normal = element_kind == 'FACE' and self.direction == 'SAME' and self.match_normal
+        if use_normal:
+            normal_references = self.edit_normal_references(meshes, index)
 
         count = 0
         for obj, bm, elements in meshes:
             matrix = obj.matrix_world
-            matched = [
-                e for e in elements
-                if select_axis_matches_any(
-                    (matrix @ edit_element_center(e))[index], references,
-                    self.direction, self.tolerance, self.distance,
-                )
-            ]
+            if use_normal:
+                matched = [
+                    e for e in elements
+                    if self.matches_value_and_normal(
+                        (matrix @ edit_element_center(e))[index],
+                        world_normal(matrix, e.normal),
+                        normal_references, self.tolerance,
+                    )
+                ]
+            else:
+                matched = [
+                    e for e in elements
+                    if select_axis_matches_any(
+                        (matrix @ edit_element_center(e))[index], references,
+                        self.direction, self.tolerance, self.distance,
+                    )
+                ]
             if not self.extend:
                 for sequence in (bm.verts, bm.edges, bm.faces):
                     for element in sequence:
@@ -1804,6 +1830,33 @@ class OBJECT_OT_CatSelectSamePivot(Operator):
             for e in elements
             if e.select
         )
+
+    @staticmethod
+    def edit_normal_references(meshes, index):
+        # 선택된 면마다 (축 값, 월드 노멀)을 기준으로 삼고 축 값 순으로 정렬해 둔다.
+        references = sorted(
+            (
+                (obj.matrix_world @ e.calc_center_median())[index],
+                world_normal(obj.matrix_world, e.normal),
+            )
+            for obj, _bm, elements in meshes
+            for e in elements
+            if e.select
+        )
+        return [value for value, _normal in references], [normal for _value, normal in references]
+
+    @staticmethod
+    def matches_value_and_normal(value, normal, normal_references, tolerance) -> bool:
+        # 축 값이 허용 오차 안인 기준들 중 하나와 노멀 방향까지 같은지 판정한다.
+        values, normals = normal_references
+        if normal.length <= 1e-9:
+            return False
+        position = bisect.bisect_left(values, value - tolerance)
+        while position < len(values) and values[position] <= value + tolerance:
+            if normal.dot(normals[position]) >= SELECT_NORMAL_MATCH_COS:
+                return True
+            position += 1
+        return False
 
 
 def edit_element_normal(element) -> Vector:

@@ -124,6 +124,49 @@ def check_edit_mesh_multiple_faces() -> None:
     remove_all_objects()
 
 
+def check_edit_mesh_face_normal_filter() -> None:
+    # 큐브 A·C의 아랫면(-Z, z=-1)과 한 단 내려간 큐브 B의 옆면 중심(z=-1)은 Z 값이 같다.
+    bm_source = bmesh.new()
+    for center in ((0.0, 0.0, 0.0), (3.0, 0.0, -1.0), (6.0, 0.0, 0.0)):
+        bmesh.ops.create_cube(bm_source, size=2.0, matrix=Matrix.Translation(center))
+    mesh = bpy.data.meshes.new("Steps")
+    bm_source.to_mesh(mesh)
+    bm_source.free()
+    obj = bpy.data.objects.new("Steps", mesh)
+    bpy.context.collection.objects.link(obj)
+    bpy.ops.object.select_all(action="DESELECT")
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.context.tool_settings.mesh_select_mode = (False, False, True)
+    bm = bmesh.from_edit_mesh(obj.data)
+
+    def select_bottom_of_a():
+        for element in (*bm.verts, *bm.edges, *bm.faces):
+            element.select = False
+        bm.select_history.clear()
+        bottom = next(
+            f for f in bm.faces
+            if f.normal.z < -0.99 and abs(f.calc_center_median().x) < 1e-6
+        )
+        bottom.select_set(True)
+        bm.select_history.add(bottom)
+        bmesh.update_edit_mesh(obj.data)
+
+    # 기본(Match Normal): -Z를 보는 A·C 아랫면 2개만, B의 옆면은 제외
+    select_bottom_of_a()
+    assert bpy.ops.object.cat_select_same_pivot(axis="Z") == {"FINISHED"}
+    selected = [f for f in bm.faces if f.select]
+    assert len(selected) == 2, f"-Z를 보는 아랫면 2개만 선택돼야 합니다: {len(selected)}"
+    assert all(f.normal.z < -0.99 for f in selected)
+
+    # Match Normal을 끄면 Z 값만 비교해 B의 옆면 4개도 포함된다.
+    select_bottom_of_a()
+    assert bpy.ops.object.cat_select_same_pivot(axis="Z", match_normal=False) == {"FINISHED"}
+    assert sum(f.select for f in bm.faces) == 6
+    remove_all_objects()
+
+
 def check_edit_mesh_verts() -> None:
     obj, bm = setup_grid()
     bpy.context.tool_settings.mesh_select_mode = (True, False, False)
@@ -352,6 +395,7 @@ def main() -> None:
         remove_all_objects()
         check_edit_mesh_faces()
         check_edit_mesh_multiple_faces()
+        check_edit_mesh_face_normal_filter()
         check_edit_mesh_verts()
         check_edit_mesh_normals()
         check_object_rotation()
