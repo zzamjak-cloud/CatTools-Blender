@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 5, 0),
+    "version": (1, 6, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -1793,6 +1793,27 @@ def edit_element_normal(element) -> Vector:
     return element.normal
 
 
+def edit_element_neighbors(element):
+    """요소와 맞닿은 같은 종류의 요소: 면은 변을 공유한 면, 선은 점을 공유한 선, 점은 선으로 이어진 점."""
+    if isinstance(element, bmesh.types.BMFace):
+        return (face for edge in element.edges for face in edge.link_faces if face is not element)
+    if isinstance(element, bmesh.types.BMEdge):
+        return (edge for vert in element.verts for edge in vert.link_edges if edge is not element)
+    return (edge.other_vert(element) for edge in element.link_edges)
+
+
+def connected_elements(seeds, candidates):
+    """seeds에서 출발해 candidates 안의 요소만 거쳐 이어진 요소를 모두 모은다."""
+    found = set(seeds)
+    stack = list(found)
+    while stack:
+        for neighbor in edit_element_neighbors(stack.pop()):
+            if neighbor in candidates and neighbor not in found:
+                found.add(neighbor)
+                stack.append(neighbor)
+    return found
+
+
 def world_normal(matrix: Matrix, normal: Vector) -> Vector:
     """
     로컬 노멀을 월드 방향으로 변환한다.
@@ -1819,6 +1840,12 @@ class OBJECT_OT_CatSelectSameNormal(Operator):
         default=math.radians(1.0), min=0.0, max=math.pi,
         precision=2, subtype='ANGLE',
     )
+    # 켜면 기준에서 같은 방향 요소끼리 맞닿아 이어진 영역만 선택한다 (Edit 모드 전용).
+    connected: BoolProperty(
+        name="Connected",
+        description="기준 요소와 맞닿아 이어진 같은 방향 요소만 선택 (Edit 모드 전용)",
+        default=True,
+    )
     extend: BoolProperty(name="Extend", description="기존 선택을 유지한 채 추가 선택", default=False)
 
     @classmethod
@@ -1826,6 +1853,16 @@ class OBJECT_OT_CatSelectSameNormal(Operator):
         if context.mode == 'EDIT_MESH':
             return True
         return context.mode == 'OBJECT' and context.active_object is not None
+
+    # 3D View 좌하단 Adjust Last Operation 패널: Connected는 Edit 모드에서만 보여 준다.
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, "angle")
+        if context.mode == 'EDIT_MESH':
+            layout.prop(self, "connected")
+        layout.prop(self, "extend")
 
     def execute(self, context) -> Set[str]:
         if context.mode == 'EDIT_MESH':
@@ -1877,6 +1914,9 @@ class OBJECT_OT_CatSelectSameNormal(Operator):
                 # 노멀이 없는(퇴화) 요소는 방향을 정할 수 없으므로 제외한다.
                 if normal.length > 1e-9 and normal.dot(reference) >= min_dot - 1e-6:
                     matched.append(e)
+            if self.connected:
+                # 이미 선택된 같은 방향 요소(기준 포함)에서 출발해 맞닿은 같은 방향 요소로만 넓힌다.
+                matched = connected_elements([e for e in matched if e.select], set(matched))
             if not self.extend:
                 for sequence in (bm.verts, bm.edges, bm.faces):
                     for element in sequence:

@@ -151,7 +151,12 @@ def check_edit_mesh_normals() -> None:
     bm.select_history.add(face)
     bmesh.update_edit_mesh(obj.data)
 
+    # 기본(Connected)은 떨어져 있는 다른 큐브의 같은 방향 면을 고르지 않는다.
     assert bpy.ops.object.cat_select_same_normal() == {"FINISHED"}
+    selected = [f for f in bm.faces if f.select]
+    assert selected == [face], f"Connected면 기준 면 1개만 선택돼야 합니다: {len(selected)}"
+
+    assert bpy.ops.object.cat_select_same_normal(connected=False) == {"FINISHED"}
     selected = [f for f in bm.faces if f.select]
     assert len(selected) == 2, f"노멀이 같은 면 2개가 선택돼야 합니다: {len(selected)}"
     assert all(f.normal.angle(face.normal) < 1e-4 for f in selected)
@@ -162,7 +167,7 @@ def check_edit_mesh_normals() -> None:
     bm.select_history.clear()
     opposite.select_set(True)
     bm.select_history.add(opposite)
-    assert bpy.ops.object.cat_select_same_normal(extend=True) == {"FINISHED"}
+    assert bpy.ops.object.cat_select_same_normal(connected=False, extend=True) == {"FINISHED"}
     assert sum(f.select for f in bm.faces) == 4
 
     for f in bm.faces:
@@ -170,8 +175,17 @@ def check_edit_mesh_normals() -> None:
     face.select_set(True)
     bm.select_history.clear()
     bm.select_history.add(face)
-    assert bpy.ops.object.cat_select_same_normal(angle=math.radians(179.0)) == {"FINISHED"}
+    assert bpy.ops.object.cat_select_same_normal(angle=math.radians(179.0), connected=False) == {"FINISHED"}
     assert sum(f.select for f in bm.faces) == 10, "반대쪽 면을 뺀 10개가 선택돼야 합니다."
+    # Connected면 기준 큐브 안에서 반대쪽 면을 뺀 5개만 이어진다.
+    # 선택된 같은 방향 면이 모두 출발점이 되므로 기준 면만 남기고 다시 실행한다.
+    for f in bm.faces:
+        f.select = False
+    face.select_set(True)
+    bm.select_history.clear()
+    bm.select_history.add(face)
+    assert bpy.ops.object.cat_select_same_normal(angle=math.radians(179.0)) == {"FINISHED"}
+    assert sum(f.select for f in bm.faces) == 5, "기준 큐브의 5개 면만 선택돼야 합니다."
 
     # 기준이 없으면 취소된다.
     for f in bm.faces:
@@ -179,6 +193,29 @@ def check_edit_mesh_normals() -> None:
     bm.select_history.clear()
     bmesh.update_edit_mesh(obj.data)
     assert bpy.ops.object.cat_select_same_normal() == {"CANCELLED"}
+    remove_all_objects()
+
+    # 맞닿은 같은 방향 면은 Connected에서도 모두 이어져 선택된다 (2x2 평면 그리드).
+    obj, bm = setup_grid()
+    bpy.context.tool_settings.mesh_select_mode = (False, False, True)
+    bm.faces.ensure_lookup_table()
+    bm.faces[0].select_set(True)
+    bm.select_history.add(bm.faces[0])
+    bmesh.update_edit_mesh(obj.data)
+    assert bpy.ops.object.cat_select_same_normal() == {"FINISHED"}
+    assert all(f.select for f in bm.faces), "맞닿은 같은 방향 면 4개가 모두 선택돼야 합니다."
+
+    # 점 모드: 이어진 같은 방향 점 9개 선택
+    bpy.context.tool_settings.mesh_select_mode = (True, False, False)
+    for element in (*bm.verts, *bm.edges, *bm.faces):
+        element.select = False
+    bm.verts.ensure_lookup_table()
+    bm.select_history.clear()
+    bm.verts[0].select_set(True)
+    bm.select_history.add(bm.verts[0])
+    bmesh.update_edit_mesh(obj.data)
+    assert bpy.ops.object.cat_select_same_normal() == {"FINISHED"}
+    assert all(v.select for v in bm.verts), "맞닿은 같은 방향 점 9개가 모두 선택돼야 합니다."
     remove_all_objects()
 
 
