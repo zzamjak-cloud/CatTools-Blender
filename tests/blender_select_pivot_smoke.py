@@ -78,6 +78,52 @@ def check_edit_mesh_faces() -> None:
     remove_all_objects()
 
 
+def check_edit_mesh_multiple_faces() -> None:
+    # 3x3 면 그리드에서 여러 면을 선택하면 각 면의 축 값이 모두 기준이 된다.
+    bpy.ops.mesh.primitive_grid_add(x_subdivisions=3, y_subdivisions=3, size=3.0, location=(10.0, 0.0, 0.0))
+    obj = bpy.context.object
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.context.tool_settings.mesh_select_mode = (False, False, True)
+    bm = bmesh.from_edit_mesh(obj.data)
+    assert len(bm.faces) == 9, len(bm.faces)
+
+    def cell(face):
+        center = face.calc_center_median()
+        return round(center.x + 1.0), round(center.y + 1.0)
+
+    def select_cells(*cells):
+        for element in (*bm.verts, *bm.edges, *bm.faces):
+            element.select = False
+        bm.select_history.clear()
+        for face in bm.faces:
+            if cell(face) in cells:
+                face.select_set(True)
+                bm.select_history.add(face)
+        bmesh.update_edit_mesh(obj.data)
+
+    def selected_cells():
+        return {cell(f) for f in bm.faces if f.select}
+
+    # 왼쪽 아래(0,0)와 오른쪽 위(2,2): Y는 아래·위 두 줄 6면, 가운데 줄은 제외
+    select_cells((0, 0), (2, 2))
+    assert bpy.ops.object.cat_select_same_pivot(axis="Y") == {"FINISHED"}
+    assert selected_cells() == {(x, y) for x in range(3) for y in (0, 2)}, selected_cells()
+
+    select_cells((0, 0), (2, 2))
+    assert bpy.ops.object.cat_select_same_pivot(axis="X") == {"FINISHED"}
+    assert selected_cells() == {(x, y) for x in (0, 2) for y in range(3)}, selected_cells()
+
+    # +X는 기준들 각각의 결과를 합친다: 열 1과 열 2 기준 → 열 1·2
+    select_cells((1, 0), (2, 2))
+    assert bpy.ops.object.cat_select_same_pivot(axis="X", direction="POSITIVE") == {"FINISHED"}
+    assert selected_cells() == {(x, y) for x in (1, 2) for y in range(3)}, selected_cells()
+    # -X는 열 0·1·2 모두 (열 2 기준의 음 방향이 전체를 덮는다)
+    select_cells((1, 0), (2, 2))
+    assert bpy.ops.object.cat_select_same_pivot(axis="X", direction="NEGATIVE") == {"FINISHED"}
+    assert len(selected_cells()) == 9, selected_cells()
+    remove_all_objects()
+
+
 def check_edit_mesh_verts() -> None:
     obj, bm = setup_grid()
     bpy.context.tool_settings.mesh_select_mode = (True, False, False)
@@ -104,6 +150,13 @@ def check_edit_mesh_verts() -> None:
     assert len(selected) == 6, f"+X 방향 점 6개가 선택돼야 합니다: {len(selected)}"
     assert all(v.co.x >= -1e-6 for v in selected)
 
+    # 선택된 점이 모두 기준이 되므로 가운데 점만 다시 선택하고 -X를 검사한다.
+    for v in bm.verts:
+        v.select = False
+    center.select_set(True)
+    bm.select_history.clear()
+    bm.select_history.add(center)
+    bmesh.update_edit_mesh(obj.data)
     assert bpy.ops.object.cat_select_same_pivot(axis="X", direction="NEGATIVE") == {"FINISHED"}
     selected = [v for v in bm.verts if v.select]
     assert len(selected) == 6, f"-X 방향 점 6개가 선택돼야 합니다: {len(selected)}"
@@ -298,6 +351,7 @@ def main() -> None:
         assert selected_names() == {"TileA", "Table"}, selected_names()
         remove_all_objects()
         check_edit_mesh_faces()
+        check_edit_mesh_multiple_faces()
         check_edit_mesh_verts()
         check_edit_mesh_normals()
         check_object_rotation()

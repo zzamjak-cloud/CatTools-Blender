@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 7, 1),
+    "version": (1, 8, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -12,7 +12,7 @@ bl_info = {
     "category": "3D View",
 }
 
-import bpy, math, bmesh
+import bpy, math, bmesh, bisect
 from typing import Set
 from bpy.types import Context, Panel, Operator
 from bpy.props import StringProperty, FloatProperty, BoolProperty, IntProperty, EnumProperty
@@ -1643,6 +1643,31 @@ def select_axis_matches(
     return abs(value - reference) <= tolerance
 
 
+def select_axis_matches_any(
+    value: float, references, direction: str, tolerance: float, distance: float = 0.0
+) -> bool:
+    """
+    축 좌표가 여러 기준 중 하나라도 선택 방향 조건을 만족하는지 판정한다.
+
+    Args:
+        value: 비교할 대상의 축 좌표
+        references: 오름차순으로 정렬된 기준 축 좌표 목록 (비어 있으면 안 된다)
+        direction, tolerance, distance: select_axis_matches와 같다
+
+    Returns:
+        조건 만족 여부 (각 기준별 선택 결과의 합집합)
+    """
+    # +/- 방향 선택의 합집합은 가장 느슨한 기준(+는 최솟값, -는 최댓값) 하나의 결과와 같다.
+    if direction == 'POSITIVE':
+        return select_axis_matches(value, references[0], direction, tolerance, distance)
+    if direction == 'NEGATIVE':
+        return select_axis_matches(value, references[-1], direction, tolerance, distance)
+    # 같은 값 선택은 가장 가까운 기준 둘만 비교하면 된다.
+    position = bisect.bisect_left(references, value)
+    neighbors = references[max(0, position - 1):position + 1]
+    return any(abs(value - reference) <= tolerance for reference in neighbors)
+
+
 class OBJECT_OT_CatSelectSamePivot(Operator):
     """지정 축의 월드 좌표가 기준과 같거나 기준보다 +/- 방향에 있는 오브젝트(Object 모드) 또는 점/선/면(Edit 모드)을 모두 선택합니다."""
     bl_idname = "object.cat_select_same_pivot"
@@ -1726,7 +1751,7 @@ class OBJECT_OT_CatSelectSamePivot(Operator):
         self.report({'INFO'}, f"{self.axis}축 피벗이 {direction_label} 오브젝트 {count}개를 선택했습니다.")
         return {'FINISHED'}
 
-    # Edit 모드: 현재 선택 모드(점/선/면)의 요소 중심 좌표를 축별로 기준과 비교해 방향 조건에 맞는 요소를 선택
+    # Edit 모드: 현재 선택 모드(점/선/면)의 요소 중심 좌표를 선택된 각 요소의 축 값과 비교해 방향 조건에 맞는 요소를 선택
     def execute_edit_mesh(self, context) -> Set[str]:
         vert_mode, edge_mode, face_mode = context.tool_settings.mesh_select_mode
         element_kind = 'FACE' if face_mode else 'EDGE' if edge_mode else 'VERT'
@@ -1740,8 +1765,8 @@ class OBJECT_OT_CatSelectSamePivot(Operator):
             bm = bmesh.from_edit_mesh(obj.data)
             meshes.append((obj, bm, [e for e in edit_elements(bm, element_kind) if not e.hide]))
 
-        reference = self.edit_reference(context, meshes, element_kind, index)
-        if reference is None:
+        references = self.edit_references(meshes, index)
+        if not references:
             self.report({'WARNING'}, "기준이 될 점, 선, 면을 선택하세요.")
             return {'CANCELLED'}
 
@@ -1750,8 +1775,8 @@ class OBJECT_OT_CatSelectSamePivot(Operator):
             matrix = obj.matrix_world
             matched = [
                 e for e in elements
-                if select_axis_matches(
-                    (matrix @ edit_element_center(e))[index], reference,
+                if select_axis_matches_any(
+                    (matrix @ edit_element_center(e))[index], references,
                     self.direction, self.tolerance, self.distance,
                 )
             ]
@@ -1771,23 +1796,14 @@ class OBJECT_OT_CatSelectSamePivot(Operator):
         return {'FINISHED'}
 
     @staticmethod
-    def edit_reference(context, meshes, element_kind, index):
-        # 활성 요소(마지막으로 클릭한 요소)를 우선 기준으로 삼고, 없으면 선택 요소들의 중앙값을 쓴다.
-        element_type = EDIT_ELEMENT_TYPES[element_kind]
-        for obj, bm, _elements in meshes:
-            if obj != context.edit_object:
-                continue
-            active = bm.select_history.active
-            if isinstance(active, element_type) and active.select:
-                return (obj.matrix_world @ edit_element_center(active))[index]
-
-        centers = [
+    def edit_references(meshes, index):
+        # 선택된 요소마다 자신의 축 값을 기준으로 삼는다 (하나만 선택하면 이전과 같은 결과).
+        return sorted(
             (obj.matrix_world @ edit_element_center(e))[index]
             for obj, _bm, elements in meshes
             for e in elements
             if e.select
-        ]
-        return sum(centers) / len(centers) if centers else None
+        )
 
 
 def edit_element_normal(element) -> Vector:
