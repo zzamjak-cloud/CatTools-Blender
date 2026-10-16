@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 8, 1),
+    "version": (1, 8, 2),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -2048,6 +2048,10 @@ def build_world_bvh(context, edit_meshes, include_others: bool):
         context: 현재 컨텍스트
         edit_meshes: (오브젝트, bmesh) 목록. 편집 중인 현재 형상을 그대로 쓴다.
         include_others: 보이는 다른 메쉬 오브젝트(모디파이어 적용 결과)도 가림체로 포함할지 여부
+
+    Returns:
+        (BVHTree, 오브젝트별 첫 폴리곤 인덱스) 튜플. 면이 없으면 (None, {}).
+        BVH가 돌려주는 폴리곤 인덱스는 첫 폴리곤 인덱스 + face.index 이다.
     """
     vertices = []
     polygons = []
@@ -2057,9 +2061,13 @@ def build_world_bvh(context, edit_meshes, include_others: bool):
         vertices.extend(matrix @ co for co in coords)
         polygons.extend([offset + index for index in face] for face in faces)
 
+    face_offsets = {}
+
     # H로 숨긴 면도 실제 형상이므로 가림체에 포함한다.
     for obj, bm in edit_meshes:
         bm.verts.index_update()
+        bm.faces.index_update()
+        face_offsets[obj] = len(polygons)
         add(
             obj.matrix_world,
             [v.co for v in bm.verts],
@@ -2084,8 +2092,8 @@ def build_world_bvh(context, edit_meshes, include_others: bool):
                 evaluated.to_mesh_clear()
 
     if not polygons:
-        return None
-    return BVHTree.FromPolygons(vertices, polygons)
+        return None, {}
+    return BVHTree.FromPolygons(vertices, polygons), face_offsets
 
 
 def face_sample_points(matrix, face, resolution: int):
@@ -2104,6 +2112,23 @@ def face_sample_points(matrix, face, resolution: int):
                 u = (i + 1.0 / 3.0) / resolution
                 v = (j + 1.0 / 3.0) / resolution
                 yield pa + (pb - pa) * u + (pc - pa) * v
+
+
+def ray_escapes(bvh, origin, direction, ignore_index: int, step: float, max_skips: int = 8) -> bool:
+    """
+    광선이 다른 면에 막히지 않고 빠져나가는지 검사한다.
+
+    비평면 사각형·N각형은 면 노멀(평균)과 실제 삼각형 방향이 달라, 시작점을 노멀 방향으로 띄워도
+    자기 면 아래에 놓일 수 있다. 자기 면은 자신을 가릴 수 없으므로 그 충돌은 건너뛰고 광선을 이어 쏜다.
+    """
+    for _ in range(max_skips):
+        location, _normal, index, _distance = bvh.ray_cast(origin, direction)
+        if location is None:
+            return True
+        if index != ignore_index:
+            return False
+        origin = location + direction * step
+    return False
 
 
 class OBJECT_OT_CatSelectHiddenFaces(Operator):
@@ -2142,7 +2167,7 @@ class OBJECT_OT_CatSelectHiddenFaces(Operator):
             for obj in objects
             if obj is not None and obj.type == 'MESH'
         ]
-        bvh = build_world_bvh(context, edit_meshes, self.include_others)
+        bvh, face_offsets = build_world_bvh(context, edit_meshes, self.include_others)
         if bvh is None:
             self.report({'WARNING'}, "검사할 면이 없습니다.")
             return {'CANCELLED'}
@@ -2156,6 +2181,7 @@ class OBJECT_OT_CatSelectHiddenFaces(Operator):
         count = 0
         for obj, bm in edit_meshes:
             matrix = obj.matrix_world
+            face_offset = face_offsets[obj]
             hidden = []
             for face in bm.faces:
                 if face.hide:
@@ -2163,7 +2189,9 @@ class OBJECT_OT_CatSelectHiddenFaces(Operator):
                 normal = world_normal(matrix, face.normal)
                 if normal.length <= 1e-9:
                     continue
-                if self.face_is_hidden(bvh, matrix, face, normal, directions, offset, self.face_samples):
+                if self.face_is_hidden(
+                    bvh, matrix, face, normal, directions, offset, self.face_samples, face_offset + face.index
+                ):
                     hidden.append(face)
             if not self.extend:
                 for sequence in (bm.verts, bm.edges, bm.faces):
@@ -2179,14 +2207,14 @@ class OBJECT_OT_CatSelectHiddenFaces(Operator):
         return {'FINISHED'}
 
     @staticmethod
-    def face_is_hidden(bvh, matrix, face, normal, directions, offset, resolution) -> bool:
+    def face_is_hidden(bvh, matrix, face, normal, directions, offset, resolution, polygon_index) -> bool:
         # 면 위에 고르게 깐 지점들에서 바깥쪽 반구로 쏜 광선이 하나라도 빠져나가면 보이는 면이다.
         # 일부만 드러난 길쭉한 면(지붕을 뚫고 나온 굴뚝 옆면 등)도 놓치지 않도록 면 전체를 표본으로 쓴다.
         outward = [d for d in directions if d.dot(normal) > 0.01]
         for point in face_sample_points(matrix, face, resolution):
             origin = point + normal * offset
             for direction in outward:
-                if bvh.ray_cast(origin, direction)[0] is None:
+                if ray_escapes(bvh, origin, direction, polygon_index, offset):
                     return False
         return True
 

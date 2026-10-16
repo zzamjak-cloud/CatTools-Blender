@@ -134,6 +134,31 @@ def check_partially_buried_column() -> None:
     remove_all_objects()
 
 
+def check_non_planar_quads() -> None:
+    # 꼭짓점 높이가 ±0.002씩 엇갈린 살짝 꼬인 사각형은 면 위 검사 지점이 BVH 삼각형 아래에 놓여
+    # 광선이 자기 면에 맞는다. 자기 면은 가림체가 아니므로 홀로 놓인 꼬인 면은 은면이 아니다.
+    # 꼭짓점 시작 순서(대각선 방향)와 노멀 방향을 모두 바꿔 가며 검사한다.
+    bm_source = bmesh.new()
+    corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    warp = 0.002
+    for slot, (rotation, reverse) in enumerate([(0, False), (0, True), (1, False), (1, True)]):
+        coords = [(x + slot * 2.0, y, warp if index % 2 == 0 else -warp) for index, (x, y) in enumerate(corners)]
+        coords = coords[rotation:] + coords[:rotation]
+        if reverse:
+            coords.reverse()
+        bm_source.faces.new([bm_source.verts.new(co) for co in coords])
+    mesh = bpy.data.meshes.new("Warped")
+    bm_source.to_mesh(mesh)
+    bm_source.free()
+    obj = bpy.data.objects.new("Warped", mesh)
+    bpy.context.collection.objects.link(obj)
+
+    bm = enter_edit(obj)
+    assert bpy.ops.object.cat_select_hidden_faces() == {"FINISHED"}
+    assert not selected_centers(bm), f"홀로 놓인 꼬인 면은 선택되지 않아야 합니다: {selected_centers(bm)}"
+    remove_all_objects()
+
+
 def check_performance() -> None:
     # 블록 10x10x2 격자(맞닿은 면 다수)도 실용적인 시간 안에 끝나야 한다.
     cubes = [((x * 1.0, y * 1.0, z * 1.0), 1.0) for x in range(10) for y in range(10) for z in range(2)]
@@ -159,6 +184,7 @@ def main() -> None:
         check_enclosed_cube()
         check_other_objects_and_partial()
         check_partially_buried_column()
+        check_non_planar_quads()
         check_performance()
     finally:
         remove_all_objects()
