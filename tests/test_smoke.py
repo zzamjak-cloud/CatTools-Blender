@@ -26,14 +26,17 @@ MIRROR_SMOKE_PATH = ROOT / "tests" / "blender_mirror_smoke.py"
 ALIGN_SMOKE_PATH = ROOT / "tests" / "blender_align_smoke.py"
 CATOON_SMOKE_PATH = ROOT / "tests" / "blender_catoon_smoke.py"
 SIDEBAR_SMOKE_PATH = ROOT / "tests" / "blender_sidebar_smoke.py"
+PALETTE_SMOKE_PATH = ROOT / "tests" / "blender_palette_smoke.py"
 
 EXPECTED_REGISTERED_CLASSES = [
+    "CatToolsPreferences",
     "OBJECT_PT_WoodyTool",
     "VIEW3D_OT_CatSidebar",
     "OBJECT_OT_CatAlign",
     "OBJECT_OT_CatSelectSamePivot",
     "OBJECT_OT_CatSelectSameNormal",
     "OBJECT_OT_CatSelectHiddenFaces",
+    "MESH_OT_CatPaletteColor",
     "CircleArray",
     "Add_Material",
     "SHADER_OP_Blend2Tex",
@@ -55,6 +58,7 @@ EXPECTED_IDNAMES = {
     "OBJECT_OT_CatSelectSamePivot": "object.cat_select_same_pivot",
     "OBJECT_OT_CatSelectSameNormal": "object.cat_select_same_normal",
     "OBJECT_OT_CatSelectHiddenFaces": "object.cat_select_hidden_faces",
+    "MESH_OT_CatPaletteColor": "mesh.cat_palette_color",
     "VIEW3D_OT_CatSidebar": "view3d.cat_toggle_sidebar",
     "Add_Cylinder_6": "wm.add_cylinder_6",
     "Add_Cylinder_8": "wm.add_cylinder_8",
@@ -128,7 +132,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], "1.0.0")
         self.assertEqual(manifest["id"], "cat_tools")
         self.assertEqual(manifest["name"], "CatTools")
-        self.assertEqual(manifest["version"], "1.8.2")
+        self.assertEqual(manifest["version"], "1.9.0")
         self.assertEqual(manifest["blender_version_min"], "4.2.0")
         self.assertIn("SPDX:GPL-3.0-or-later", manifest["license"])
 
@@ -141,7 +145,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         info = ast.literal_eval(info_node.value)
         self.assertEqual(info["name"], "CatTools")
-        self.assertEqual(info["version"], (1, 8, 2))
+        self.assertEqual(info["version"], (1, 9, 0))
         self.assertEqual(info["blender"], (4, 2, 0))
 
     def test_registered_class_order(self) -> None:
@@ -429,6 +433,32 @@ class CatToolsSmokeTest(unittest.TestCase):
             "row.operator(SHADER_OP_Catoon.bl_idname, text=SHADER_OP_Catoon.bl_label)",
             ast.unparse(draw),
         )
+
+    def test_palette_color_button_is_exposed(self) -> None:
+        panel = self.classes["OBJECT_PT_WoodyTool"]
+        draw = next(
+            node
+            for node in panel.body
+            if isinstance(node, ast.FunctionDef) and node.name == "draw"
+        )
+        self.assertIn("MESH_OT_CatPaletteColor.bl_idname, text='Color (Alt+C)'", ast.unparse(draw))
+        self.assertIn(
+            "keymaps.new(name=\"Mesh\", space_type='EMPTY')", self.source
+        )
+        self.assertIn(
+            "keymap_items.new(MESH_OT_CatPaletteColor.bl_idname, 'C', 'PRESS', alt=True)", self.source
+        )
+        self.assertIn("palette_path", ast.unparse(draw))
+        self.assertEqual(
+            module_constant(self.tree, "DEFAULT_PALETTE_PATH"),
+            "/Users/woody/dev/Godo_Project/Civilization_Merge/assets/ui/palette/palette.png",
+        )
+
+    def test_palette_runtime_smoke_syntax(self) -> None:
+        source = PALETTE_SMOKE_PATH.read_text(encoding="utf-8")
+        compile(source, str(PALETTE_SMOKE_PATH), "exec")
+        self.assertIn("bpy.ops.mesh.cat_palette_color(", source)
+        self.assertIn("restore_face_uvs", source)
 
     def test_catoon_runtime_smoke_renders_two_tones(self) -> None:
         source = CATOON_SMOKE_PATH.read_text(encoding="utf-8")

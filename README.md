@@ -18,6 +18,7 @@ CatTools는 CAT 블록 모델링 작업에 사용해 온 **Woody Tools**의 최�
 - Select +X·+Y·+Z / -X·-Y·-Z: 기준(활성 오브젝트 피벗, Edit 모드는 선택된 요소 각각이며 결과는 합쳐짐)을 포함해 해당 축의 양(+)·음(-) 방향에 있는 오브젝트·점·선·면을 모두 선택. 실행 후 3D View 좌하단 Adjust Last Operation 패널의 Distance로 기준에서 얼마나 떨어진 곳부터 선택할지 조절 (0보다 크면 기준 자신은 제외)
 - Select Normal: Edit 모드에서 활성 요소(없으면 선택 요소 평균)와 월드 노멀 방향이 같은 면·선·점을 모두 선택. 면이 축에 맞지 않게 회전돼 있어도 같은 방향을 보는 면을 고를 수 있고, Adjust Last Operation 패널의 Angle(기본 1°)로 허용 각도를 조절하고, Connected(기본 켜짐)로 기준과 맞닿아 이어진 같은 방향 요소만 선택하도록 한정(끄면 떨어진 요소까지 모두 선택). Object 모드에서는 활성 오브젝트와 월드 회전이 같은 오브젝트를 선택
 - Select Hidden: Edit 모드에서 어느 방향에서도 보이지 않는 은면(블록끼리 맞닿은 면, 다른 형상 안에 갇힌 면 등)을 선택만 하고 삭제는 하지 않음. 면 전체에 고르게 깐 지점에서 바깥쪽으로 광선을 쏴 하나도 빠져나가지 못한 면만 고르므로 일부라도 보이는 면은 제외. Adjust Last Operation 패널의 Samples(광선 방향 수), Face Samples(면 위 검사 지점 밀도, 기본 4)와 Other Objects(다른 보이는 메쉬 오브젝트도 가림체로 사용, 기본 켜짐)로 조절
+- Palette Color: Edit 모드에서 면을 선택하고 Palette의 Color를 누르거나 Alt+C(Edit 모드 단축키, 마우스 위치에 뜸)를 누르면 3D 뷰에 컬러 스와치 이미지가 뜨고, 클릭한 색 칸의 중앙으로 선택 면의 모든 UV 점을 옮김. 마우스를 올린 칸의 색이 실시간으로 모델에 미리 적용되며, Esc·우클릭·팔레트 밖 클릭은 원래 UV로 되돌림. 칸 격자는 이미지에서 자동 인식하고(색 경계의 최대공약수), 이미지 경로는 사이드바 Color 버튼 아래 또는 애드온 환경설정에서 바꿈 (UV 레이어가 없으면 새로 만듦)
 - Align 축약 버튼: 활성 오브젝트를 기준으로 선택 오브젝트의 Loc·Rot·Sca를 X·Y·Z·All 축별 정렬
 - 기본 머티리얼 생성
 - 양면 텍스처 및 2·3·4 텍스처 셰이더 구성
@@ -117,6 +118,13 @@ N 키 사이드바 토글과 CatTools 탭 활성화를 확인하려면 창이 �
 
 ```bash
 ./scripts/dev_run.sh --python tests/blender_sidebar_smoke.py
+```
+
+팔레트 오버레이·호버 미리보기·확정/취소는 이벤트 시뮬레이션이 켜진 실제 창에서 검사합니다.
+
+```bash
+./scripts/dev_run.sh --background --python tests/blender_palette_smoke.py
+./scripts/dev_run.sh --enable-event-simulate --python tests/blender_palette_gui_smoke.py
 ```
 
 기능 수정 중에는 이 개발 프로필을 사용하며 GitHub 릴리스나 원격 설치본을 매번 갱신할 필요가 없습니다.

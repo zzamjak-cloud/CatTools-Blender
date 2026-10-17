@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 8, 2),
+    "version": (1, 9, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -12,13 +12,15 @@ bl_info = {
     "category": "3D View",
 }
 
-import bpy, math, bmesh, bisect
+import bpy, math, bmesh, bisect, os, blf, gpu
+import numpy as np
 from typing import Set
-from bpy.types import Context, Panel, Operator
+from bpy.types import AddonPreferences, Context, Panel, Operator, SpaceView3D
 from bpy.props import StringProperty, FloatProperty, BoolProperty, IntProperty, EnumProperty
 from mathutils import Euler, Matrix, Quaternion, Vector
 from mathutils.bvhtree import BVHTree
 from mathutils.geometry import tessellate_polygon
+from gpu_extras.batch import batch_for_shader
 
 # Transform / Align 행의 (기본 라벨, 축약 라벨, 대상) — 3x3 축약 그리드
 TRANSFORM_ROWS = (
@@ -418,11 +420,15 @@ class OBJECT_PT_WoodyTool(Panel):
 
         layout.separator(factor=1)
 
-    # 팔레트
-        # layout.label(text="Palette :", icon='GROUP_VCOL')
-        # layout.operator(PALETTE_OP_RGB.bl_idname, text= PALETTE_OP_RGB.bl_label)
+    # 팔레트: 선택한 면의 UV를 컬러 스와치 이미지의 색 칸 중앙으로 모은다 (Edit 모드 전용)
+        layout.label(text="Palette :", icon='COLOR')
+        column = layout.column(align=True)
+        column.operator(MESH_OT_CatPaletteColor.bl_idname, text="Color (Alt+C)", icon='EYEDROPPER')
+        preferences = cat_preferences(context)
+        if preferences is not None:
+            column.prop(preferences, "palette_path", text="")
 
-        # layout.separator(factor=1)
+        layout.separator(factor=1)
 
         # 모디파이어
         layout.label(text="Modifier :", icon= 'MODIFIER_DATA')
@@ -2219,6 +2225,401 @@ class OBJECT_OT_CatSelectHiddenFaces(Operator):
         return True
 
 
+# 컬러 팔레트 UV ------------------------------------------------------------------
+
+DEFAULT_PALETTE_PATH = "/Users/woody/dev/Godo_Project/Civilization_Merge/assets/ui/palette/palette.png"
+# 팔레트 오버레이의 기본 폭(UI 스케일 1 기준 픽셀). 3D 뷰가 좁으면 그만큼 줄인다.
+PALETTE_DISPLAY_WIDTH = 512
+PALETTE_MARGIN = 16
+PALETTE_HEADER = 24
+
+# 경로별로 (수정 시각, 팔레트 데이터)를 보관해 같은 이미지를 매번 다시 읽지 않는다.
+_palette_cache = {}
+
+
+class CatToolsPreferences(AddonPreferences):
+    # Extension에서는 패키지 이름(bl_ext.user_default.cat_tools)이 곧 모듈 이름이다.
+    bl_idname = __name__
+
+    palette_path: StringProperty(
+        name="Palette Image",
+        description="Palette Color 버튼이 띄우는 컬러 스와치 이미지",
+        subtype='FILE_PATH',
+        default=DEFAULT_PALETTE_PATH,
+    )
+
+    def draw(self, context):
+        self.layout.prop(self, "palette_path")
+
+
+def cat_preferences(context):
+    addon = context.preferences.addons.get(__name__)
+    return addon.preferences if addon is not None else None
+
+
+def palette_image_path(context) -> str:
+    preferences = cat_preferences(context)
+    path = preferences.palette_path if preferences is not None else DEFAULT_PALETTE_PATH
+    return bpy.path.abspath(path)
+
+
+def palette_grid_step(colors, axis: int) -> int:
+    # 색이 바뀌는 모든 경계 위치와 이미지 크기의 최대공약수를 칸 크기로 쓴다.
+    # 칸이 균일한 스와치면 정확한 칸 크기가, 그라데이션이면 1픽셀이 나온다.
+    size = colors.shape[axis]
+    other_axes = tuple(index for index in range(3) if index != axis)
+    changed = np.any(np.diff(colors.astype(np.int16), axis=axis) != 0, axis=other_axes)
+    boundaries = np.nonzero(changed)[0] + 1
+    return int(np.gcd.reduce(np.append(boundaries, size)))
+
+
+def palette_from_pixels(pixels, width: int, height: int) -> dict:
+    # Blender 이미지 픽셀은 아래 행부터 저장되므로 위→아래 순서로 뒤집는다.
+    colors = np.round(np.asarray(pixels, dtype=np.float32).reshape(height, width, 4)[::-1] * 255)
+    colors = colors.astype(np.uint8)
+    cell_width = palette_grid_step(colors, 1)
+    cell_height = palette_grid_step(colors, 0)
+    return {
+        "width": width,
+        "height": height,
+        "cell_width": cell_width,
+        "cell_height": cell_height,
+        "columns": width // cell_width,
+        "rows": height // cell_height,
+        # 칸 중앙 픽셀의 색 (rows, columns, 4)
+        "cell_colors": colors[cell_height // 2::cell_height, cell_width // 2::cell_width].copy(),
+    }
+
+
+def load_palette(path: str) -> dict:
+    """팔레트 이미지를 읽어 칸 격자와 칸별 색을 돌려준다. 실패하면 OSError/RuntimeError."""
+    mtime = os.path.getmtime(path)
+    cached = _palette_cache.get(path)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    # 사용자가 머티리얼에 쓰는 같은 이미지와 섞이지 않도록 별도 데이터로 읽고 바로 지운다.
+    image = bpy.data.images.load(path, check_existing=False)
+    try:
+        width, height = image.size
+        if width == 0 or height == 0:
+            raise RuntimeError(f"이미지를 읽을 수 없습니다: {path}")
+        pixels = np.empty(width * height * 4, dtype=np.float32)
+        image.pixels.foreach_get(pixels)
+    finally:
+        bpy.data.images.remove(image)
+    palette = palette_from_pixels(pixels, width, height)
+    _palette_cache[path] = (mtime, palette)
+    return palette
+
+
+def palette_cell_uv(palette: dict, cell) -> tuple[float, float]:
+    column, row = cell
+    return ((column + 0.5) / palette["columns"], 1.0 - (row + 0.5) / palette["rows"])
+
+
+def edit_mesh_objects(context):
+    objects = getattr(context, "objects_in_mode_unique_data", None) or [context.edit_object]
+    return [obj for obj in objects if obj is not None and obj.type == 'MESH']
+
+
+def selected_face_count(context) -> int:
+    return sum(
+        sum(1 for face in bmesh.from_edit_mesh(obj.data).faces if face.select and not face.hide)
+        for obj in edit_mesh_objects(context)
+    )
+
+
+def apply_palette_uv(context, uv) -> int:
+    """선택된 면의 모든 UV 점을 uv 한 점으로 모으고, 처리한 면 수를 돌려준다."""
+    count = 0
+    for obj in edit_mesh_objects(context):
+        bm = bmesh.from_edit_mesh(obj.data)
+        faces = [face for face in bm.faces if face.select and not face.hide]
+        if not faces:
+            continue
+        layer = bm.loops.layers.uv.active or bm.loops.layers.uv.new("UVMap")
+        for face in faces:
+            for loop in face.loops:
+                loop[layer].uv = uv
+        bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+        count += len(faces)
+    return count
+
+
+def capture_face_uvs(context) -> dict:
+    """선택된 면의 현재 UV를 저장한다. UV 레이어가 없던 오브젝트는 None으로 기록한다."""
+    snapshot = {}
+    for obj in edit_mesh_objects(context):
+        bm = bmesh.from_edit_mesh(obj.data)
+        layer = bm.loops.layers.uv.active
+        if layer is None:
+            snapshot[obj.name] = None
+            continue
+        # 돌출 등 직후에는 인덱스가 dirty일 수 있어 새로 매긴다. 모달 중에는 토폴로지가 바뀌지 않는다.
+        bm.faces.index_update()
+        snapshot[obj.name] = [
+            (face.index, [loop[layer].uv.copy() for loop in face.loops])
+            for face in bm.faces
+            if face.select and not face.hide
+        ]
+    return snapshot
+
+
+def restore_face_uvs(context, snapshot: dict) -> None:
+    """capture_face_uvs로 저장한 UV로 되돌린다. 미리보기 때문에 생긴 UV 레이어는 지운다."""
+    for obj in edit_mesh_objects(context):
+        if obj.name not in snapshot:
+            continue
+        bm = bmesh.from_edit_mesh(obj.data)
+        layer = bm.loops.layers.uv.active
+        saved = snapshot[obj.name]
+        if saved is None:
+            if layer is not None:
+                bm.loops.layers.uv.remove(layer)
+        elif layer is not None:
+            bm.faces.ensure_lookup_table()
+            for face_index, uvs in saved:
+                if face_index >= len(bm.faces):
+                    continue
+                for loop, uv in zip(bm.faces[face_index].loops, uvs):
+                    loop[layer].uv = uv
+        bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+
+
+class PaletteOverlay:
+    """3D 뷰 위에 그리는 팔레트 스와치. 연산자 RNA 수명과 분리하려고 일반 객체로 둔다."""
+
+    def __init__(self, palette: dict, region, left: float, bottom: float, scale: float):
+        self.palette = palette
+        self.region_pointer = region.as_pointer()
+        self.left = left
+        self.bottom = bottom
+        self.scale = scale
+        self.draw_width = palette["width"] * scale
+        self.draw_height = palette["height"] * scale
+        self.hover = None
+        self._batch = None
+
+    @classmethod
+    def fit(cls, context, palette: dict, region, mouse_x: float, mouse_y: float):
+        # 겹친 사이드바 아래에 가려지지 않도록 오른쪽 한계를 사이드바 왼쪽 끝으로 잡는다.
+        right = region.width
+        for other in context.area.regions:
+            if other.type == 'UI' and other.width > 1 and region.x < other.x < region.x + region.width:
+                right = min(right, other.x - region.x)
+        available_width = right - PALETTE_MARGIN * 2
+        available_height = region.height - PALETTE_MARGIN * 2 - PALETTE_HEADER
+        ui_scale = context.preferences.system.ui_scale
+        scale = min(
+            PALETTE_DISPLAY_WIDTH * ui_scale / palette["width"],
+            available_width / palette["width"],
+            available_height / palette["height"],
+        )
+        if scale <= 0:
+            return None
+        width = palette["width"] * scale
+        height = palette["height"] * scale
+        left = min(max(mouse_x - width / 2, PALETTE_MARGIN), right - PALETTE_MARGIN - width)
+        bottom = min(
+            max(mouse_y - height / 2, PALETTE_MARGIN),
+            region.height - PALETTE_MARGIN - PALETTE_HEADER - height,
+        )
+        return cls(palette, region, left, bottom, scale)
+
+    def cell_at(self, x: float, y: float):
+        # 화면 좌표(아래→위)를 이미지 픽셀(위→아래)로 바꿔 칸을 찾는다.
+        pixel_x = (x - self.left) / self.scale
+        pixel_y = (self.bottom + self.draw_height - y) / self.scale
+        palette = self.palette
+        if not (0 <= pixel_x < palette["width"] and 0 <= pixel_y < palette["height"]):
+            return None
+        return (int(pixel_x) // palette["cell_width"], int(pixel_y) // palette["cell_height"])
+
+    def cell_rect(self, cell):
+        column, row = cell
+        cell_width = self.palette["cell_width"] * self.scale
+        cell_height = self.palette["cell_height"] * self.scale
+        x0 = self.left + column * cell_width
+        y1 = self.bottom + self.draw_height - row * cell_height
+        return x0, y1 - cell_height, x0 + cell_width, y1
+
+    def cell_color(self, cell):
+        column, row = cell
+        return self.palette["cell_colors"][row, column]
+
+    def build_batch(self, shader):
+        palette = self.palette
+        columns, rows = palette["columns"], palette["rows"]
+        cell_width = palette["cell_width"] * self.scale
+        cell_height = palette["cell_height"] * self.scale
+        column_index, row_index = np.meshgrid(np.arange(columns), np.arange(rows))
+        x0 = (self.left + column_index * cell_width).ravel()
+        y1 = (self.bottom + self.draw_height - row_index * cell_height).ravel()
+        x1 = x0 + cell_width
+        y0 = y1 - cell_height
+        # 칸마다 삼각형 두 개(6 정점)
+        xs = np.stack((x0, x1, x1, x0, x1, x0), axis=1).ravel()
+        ys = np.stack((y0, y0, y1, y0, y1, y1), axis=1).ravel()
+        positions = np.stack((xs, ys), axis=1).astype(np.float32)
+        colors = palette["cell_colors"].reshape(-1, 4).astype(np.float32) / 255.0
+        colors[:, 3] = 1.0
+        colors = np.repeat(colors, 6, axis=0)
+        return batch_for_shader(shader, 'TRIS', {"pos": positions, "color": colors})
+
+    @staticmethod
+    def draw_rect(shader, rect, color) -> None:
+        x0, y0, x1, y1 = rect
+        batch = batch_for_shader(
+            shader, 'TRIS', {"pos": ((x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1))}
+        )
+        shader.uniform_float("color", color)
+        batch.draw(shader)
+
+    def draw(self) -> None:
+        region = bpy.context.region
+        # 같은 화면의 다른 3D 뷰에는 그리지 않는다.
+        if region is None or region.as_pointer() != self.region_pointer:
+            return
+        flat = gpu.shader.from_builtin('FLAT_COLOR')
+        uniform = gpu.shader.from_builtin('UNIFORM_COLOR')
+        if self._batch is None:
+            self._batch = self.build_batch(flat)
+        gpu.state.blend_set('ALPHA')
+        pad = 6
+        self.draw_rect(
+            uniform,
+            (self.left - pad, self.bottom - pad,
+             self.left + self.draw_width + pad, self.bottom + self.draw_height + PALETTE_HEADER),
+            (0.08, 0.08, 0.08, 0.92),
+        )
+        self._batch.draw(flat)
+        # 가리킨 칸은 테두리를 두르고 살짝 키워 보여준다.
+        if self.hover is not None:
+            x0, y0, x1, y1 = self.cell_rect(self.hover)
+            color = tuple(float(value) / 255.0 for value in self.cell_color(self.hover)[:3]) + (1.0,)
+            for grow, fill in ((4, (0.0, 0.0, 0.0, 1.0)), (3, (1.0, 1.0, 1.0, 1.0)), (1, color)):
+                self.draw_rect(uniform, (x0 - grow, y0 - grow, x1 + grow, y1 + grow), fill)
+        gpu.state.blend_set('NONE')
+
+        text = "Click: 이 색으로 확정 · Esc/우클릭: 취소"
+        if self.hover is not None:
+            red, green, blue = (int(value) for value in self.cell_color(self.hover)[:3])
+            text = f"#{red:02X}{green:02X}{blue:02X}  ·  {text}"
+        font_id = 0
+        blf.size(font_id, 11 * bpy.context.preferences.system.ui_scale)
+        blf.color(font_id, 0.9, 0.9, 0.9, 1.0)
+        blf.position(font_id, self.left, self.bottom + self.draw_height + 7, 0)
+        blf.draw(font_id, text)
+
+
+class MESH_OT_CatPaletteColor(Operator):
+    """컬러 스와치를 띄워 클릭한 색 칸의 중앙으로 선택한 면의 UV를 모두 옮깁니다. 호버 중에는 실시간으로 미리 봅니다."""
+    bl_idname = "mesh.cat_palette_color"
+    bl_label = "Palette Color"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    u: FloatProperty(name="U", description="옮길 UV 좌표 U", default=0.5, min=0.0, max=1.0)
+    v: FloatProperty(name="V", description="옮길 UV 좌표 V", default=0.5, min=0.0, max=1.0)
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'EDIT_MESH'
+
+    def execute(self, context) -> Set[str]:
+        count = apply_palette_uv(context, (self.u, self.v))
+        if count == 0:
+            self.report({'WARNING'}, "선택된 면이 없습니다.")
+            return {'CANCELLED'}
+        self.report({'INFO'}, f"면 {count}개의 UV를 ({self.u:.4f}, {self.v:.4f})로 옮겼습니다.")
+        return {'FINISHED'}
+
+    def invoke(self, context, event) -> Set[str]:
+        if selected_face_count(context) == 0:
+            self.report({'WARNING'}, "UV를 옮길 면을 선택하세요.")
+            return {'CANCELLED'}
+        path = palette_image_path(context)
+        try:
+            palette = load_palette(path)
+        except (OSError, RuntimeError) as error:
+            self.report({'ERROR'}, f"팔레트 이미지를 열 수 없습니다: {path} ({error})")
+            return {'CANCELLED'}
+        if context.area is None or context.area.type != 'VIEW_3D':
+            self.report({'WARNING'}, "3D 뷰에서 실행하세요.")
+            return {'CANCELLED'}
+        # Quad View에서는 마우스가 있는 사분면을, 사이드바에서 눌렀으면 가장 가까운 창 영역을 쓴다.
+        windows = [r for r in context.area.regions if r.type == 'WINDOW']
+        if not windows:
+            return {'CANCELLED'}
+        region = min(
+            windows,
+            key=lambda r: (
+                max(r.x - event.mouse_x, 0, event.mouse_x - (r.x + r.width))
+                + max(r.y - event.mouse_y, 0, event.mouse_y - (r.y + r.height))
+            ),
+        )
+        overlay = PaletteOverlay.fit(
+            context, palette, region, event.mouse_x - region.x, event.mouse_y - region.y
+        )
+        if overlay is None:
+            self.report({'WARNING'}, "3D 뷰가 너무 작아 팔레트를 띄울 수 없습니다.")
+            return {'CANCELLED'}
+        self._overlay = overlay
+        self._region = region
+        # 호버 미리보기가 UV를 바로 바꾸므로, 취소할 때 되돌릴 원래 UV를 저장한다.
+        self._original_uvs = capture_face_uvs(context)
+        self._handle = SpaceView3D.draw_handler_add(overlay.draw, (), 'WINDOW', 'POST_PIXEL')
+        context.window_manager.modal_handler_add(self)
+        region.tag_redraw()
+        return {'RUNNING_MODAL'}
+
+    def finish(self) -> None:
+        if self._handle is not None:
+            SpaceView3D.draw_handler_remove(self._handle, 'WINDOW')
+            self._handle = None
+            self._region.tag_redraw()
+
+    def cancel(self, context) -> None:
+        # 파일 로드·창 닫기 등으로 Blender가 모달을 강제로 끝낼 때도 오버레이와 UV를 정리한다.
+        self.finish()
+        try:
+            restore_face_uvs(context, self._original_uvs)
+        except (ReferenceError, RuntimeError, ValueError):
+            pass
+
+    def modal(self, context, event) -> Set[str]:
+        try:
+            return self.handle_event(context, event)
+        except Exception:
+            self.cancel(context)
+            raise
+
+    def handle_event(self, context, event) -> Set[str]:
+        x = event.mouse_x - self._region.x
+        y = event.mouse_y - self._region.y
+        if event.type == 'MOUSEMOVE':
+            hover = self._overlay.cell_at(x, y)
+            if hover != self._overlay.hover:
+                self._overlay.hover = hover
+                if hover is None:
+                    restore_face_uvs(context, self._original_uvs)
+                else:
+                    apply_palette_uv(context, palette_cell_uv(self._overlay.palette, hover))
+                self._region.tag_redraw()
+        elif event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            cell = self._overlay.cell_at(x, y)
+            self.finish()
+            if cell is None:
+                restore_face_uvs(context, self._original_uvs)
+                return {'CANCELLED'}
+            self.u, self.v = palette_cell_uv(self._overlay.palette, cell)
+            return self.execute(context)
+        elif event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
+            self.finish()
+            restore_face_uvs(context, self._original_uvs)
+            return {'CANCELLED'}
+        return {'RUNNING_MODAL'}
+
+
 class VIEW3D_OT_CatSidebar(Operator):
     """사이드바를 토글하고, 열 때 CatTools 탭을 활성화합니다."""
     bl_idname = "view3d.cat_toggle_sidebar"
@@ -2253,6 +2654,10 @@ def register_keymaps() -> None:
     keymap = keyconfig.keymaps.new(name="3D View", space_type='VIEW_3D')
     item = keymap.keymap_items.new(VIEW3D_OT_CatSidebar.bl_idname, 'N', 'PRESS')
     addon_keymaps.append((keymap, item))
+    # 팔레트는 Edit 모드 전용이라 Mesh 키맵에만 둔다. Alt+C는 기본 키맵에서 비어 있다.
+    keymap = keyconfig.keymaps.new(name="Mesh", space_type='EMPTY')
+    item = keymap.keymap_items.new(MESH_OT_CatPaletteColor.bl_idname, 'C', 'PRESS', alt=True)
+    addon_keymaps.append((keymap, item))
 
 
 def unregister_keymaps() -> None:
@@ -2262,12 +2667,14 @@ def unregister_keymaps() -> None:
 
 
 classes = [
+    CatToolsPreferences,
     OBJECT_PT_WoodyTool,
     VIEW3D_OT_CatSidebar,
     OBJECT_OT_CatAlign,
     OBJECT_OT_CatSelectSamePivot,
     OBJECT_OT_CatSelectSameNormal,
     OBJECT_OT_CatSelectHiddenFaces,
+    MESH_OT_CatPaletteColor,
     # OBJECT_PT_Spacing,
     # OBJECT_PT_Mirror_Modifier,
     # Add_Cylinder_6,
