@@ -57,12 +57,15 @@ def main():
     def overlay():
         # 모달 연산자의 오버레이는 draw 핸들러 인자로만 보이므로 동일 계산으로 재현한다.
         with bpy.context.temp_override(window=window, area=area, region=region):
-            return module.PaletteOverlay.fit(
-                bpy.context, palette, region, center[0] - region.x, center[1] - region.y
-            )
+            return module.PaletteOverlay.fit(bpy.context, palette, region)
 
     def step_hover():
         ov = overlay()
+        # 우측 하단 배치: 오른쪽·아래 여백이 PALETTE_MARGIN
+        if abs(ov.bottom - module.PALETTE_MARGIN) > 0.5:
+            fail(f"팔레트가 하단에 붙지 않음 bottom={ov.bottom}")
+        if ov.left + ov.draw_width < region.width * 0.6:
+            fail("팔레트가 우측에 있지 않음")
         state["ov"] = ov
         cell = (5, 3)
         x0, y0, x1, y1 = ov.cell_rect(cell)

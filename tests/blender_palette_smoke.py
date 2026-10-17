@@ -10,6 +10,7 @@ from pathlib import Path
 
 import bmesh
 import bpy
+import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,6 +81,22 @@ def make_cube(with_uv: bool = True):
     return obj
 
 
+def make_cube_object(name: str, uv):
+    """모든 UV가 uv 한 점인 Object 모드 큐브."""
+    mesh = bpy.data.meshes.new(name)
+    bm = bmesh.new()
+    layer = bm.loops.layers.uv.new("UVMap")
+    bmesh.ops.create_cube(bm, size=1.0)
+    for face in bm.faces:
+        for loop in face.loops:
+            loop[layer].uv = uv
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    return obj
+
+
 def face_uvs(obj):
     bm = bmesh.from_edit_mesh(obj.data)
     layer = bm.loops.layers.uv.active
@@ -106,6 +123,37 @@ def main() -> None:
             assert overlay.cell_at(5, 155) == (0, 0)
             assert overlay.cell_at(125, 5) == (3, 1)
             assert overlay.cell_at(-1, 5) is None and overlay.cell_at(5, 161) is None
+
+            # 사용 중인 칸: 경계값 1.0은 감싸지 않고, 범위 밖 UV는 반복처럼 감싼다.
+            points = np.array([(0.1, 0.9), (0.12, 0.95), (1.0, 0.0), (1.625, 0.25)], dtype=np.float32)
+            assert module.palette_used_cells(palette, points) == [(0, 0), (2, 1), (3, 1)], (
+                module.palette_used_cells(palette, points)
+            )
+
+            # 팔레트 이미지를 쓰는 머티리얼이 있으면 그 메쉬의 UV만 모은다.
+            make_cube()
+            bpy.ops.object.mode_set(mode="OBJECT")
+            other = make_cube_object("Other", (0.9, 0.9))
+            image = bpy.data.images.load(path)
+            material = bpy.data.materials.new("PaletteMat")
+            material.use_nodes = True
+            node = material.node_tree.nodes.new("ShaderNodeTexImage")
+            node.image = image
+            other.data.materials.append(material)
+            # 새로 링크한 오브젝트는 뷰 레이어 동기화 뒤에 view_layer.objects에 나타난다.
+            bpy.context.view_layer.update()
+            points = module.palette_uv_points(bpy.context, path)
+            assert len(points) == 24 and np.allclose(points, (0.9, 0.9)), points[:3]
+            # 노드 그룹 안의 Image Texture도 찾는다.
+            group = bpy.data.node_groups.new("PaletteGroup", "ShaderNodeTree")
+            group.nodes.new("ShaderNodeTexImage").image = image
+            grouped = bpy.data.materials.new("GroupedMat")
+            grouped.use_nodes = True
+            grouped.node_tree.nodes.new("ShaderNodeGroup").node_tree = group
+            assert module.material_uses_image(grouped, path)
+            other.data.materials.clear()
+            assert len(module.palette_uv_points(bpy.context, path)) == 48
+            bpy.data.objects.remove(other)
 
         obj = make_cube()
         before = face_uvs(obj)

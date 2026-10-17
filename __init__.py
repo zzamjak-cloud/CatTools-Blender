@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 9, 0),
+    "version": (1, 10, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -2386,6 +2386,82 @@ def restore_face_uvs(context, snapshot: dict) -> None:
         bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
 
 
+def node_tree_images(node_tree, visited=None):
+    """노드 트리(노드 그룹 안쪽 포함)의 Image Texture 이미지를 모두 돌려준다."""
+    visited = set() if visited is None else visited
+    if node_tree is None or node_tree.as_pointer() in visited:
+        return
+    visited.add(node_tree.as_pointer())
+    for node in node_tree.nodes:
+        if node.type == 'TEX_IMAGE' and node.image is not None:
+            yield node.image
+        elif node.type == 'GROUP':
+            yield from node_tree_images(node.node_tree, visited)
+
+
+def material_uses_image(material, path: str) -> bool:
+    if material is None or not material.use_nodes or material.node_tree is None:
+        return False
+    for image in node_tree_images(material.node_tree):
+        if not image.filepath:
+            continue
+        image_path = bpy.path.abspath(image.filepath, library=image.library)
+        try:
+            if os.path.samefile(image_path, path):
+                return True
+        except OSError:
+            if os.path.basename(image_path) == os.path.basename(path):
+                return True
+    return False
+
+
+def object_uv_points(obj):
+    """오브젝트 활성 UV 레이어의 모든 UV 점 (N, 2). Edit 모드면 편집 중인 bmesh에서 읽는다."""
+    if obj.mode == 'EDIT':
+        bm = bmesh.from_edit_mesh(obj.data)
+        layer = bm.loops.layers.uv.active
+        if layer is None:
+            return np.empty((0, 2), dtype=np.float32)
+        return np.array(
+            [loop[layer].uv[:] for face in bm.faces if not face.hide for loop in face.loops],
+            dtype=np.float32,
+        ).reshape(-1, 2)
+    layer = obj.data.uv_layers.active
+    if layer is None:
+        return np.empty((0, 2), dtype=np.float32)
+    points = np.empty(len(layer.data) * 2, dtype=np.float32)
+    layer.data.foreach_get("uv", points)
+    return points.reshape(-1, 2)
+
+
+def palette_uv_points(context, path: str):
+    """보이는 메쉬들의 UV 점을 모은다. 팔레트 이미지를 쓰는 머티리얼이 있으면 그 메쉬만 본다."""
+    meshes = [
+        obj for obj in context.view_layer.objects
+        if obj.type == 'MESH' and obj.visible_get()
+    ]
+    using_palette = [
+        obj for obj in meshes
+        if any(material_uses_image(slot.material, path) for slot in obj.material_slots)
+    ]
+    targets = using_palette or meshes
+    points = [object_uv_points(obj) for obj in targets]
+    return np.concatenate(points) if points else np.empty((0, 2), dtype=np.float32)
+
+
+def palette_used_cells(palette: dict, points):
+    if len(points) == 0:
+        return []
+    # 0~1 밖의 UV만 텍스처 반복처럼 감싼다. 경계값 1.0은 감싸면 반대편 칸이 되므로 그대로 둔다.
+    u, v = points[:, 0], points[:, 1]
+    u = np.where((u < 0.0) | (u > 1.0), np.mod(u, 1.0), u)
+    v = np.where((v < 0.0) | (v > 1.0), np.mod(v, 1.0), v)
+    columns = np.clip((u * palette["columns"]).astype(np.int64), 0, palette["columns"] - 1)
+    rows = np.clip(((1.0 - v) * palette["rows"]).astype(np.int64), 0, palette["rows"] - 1)
+    cells = np.unique(np.stack((columns, rows), axis=1), axis=0)
+    return [tuple(int(value) for value in cell) for cell in cells]
+
+
 class PaletteOverlay:
     """3D 뷰 위에 그리는 팔레트 스와치. 연산자 RNA 수명과 분리하려고 일반 객체로 둔다."""
 
@@ -2398,10 +2474,13 @@ class PaletteOverlay:
         self.draw_width = palette["width"] * scale
         self.draw_height = palette["height"] * scale
         self.hover = None
+        # 다른 메쉬가 이미 쓰고 있는 칸 (column, row) 목록. 칸 중앙에 점으로 표시한다.
+        self.used_cells = []
         self._batch = None
+        self._dot_batches = None
 
     @classmethod
-    def fit(cls, context, palette: dict, region, mouse_x: float, mouse_y: float):
+    def fit(cls, context, palette: dict, region):
         # 겹친 사이드바 아래에 가려지지 않도록 오른쪽 한계를 사이드바 왼쪽 끝으로 잡는다.
         right = region.width
         for other in context.area.regions:
@@ -2419,12 +2498,8 @@ class PaletteOverlay:
             return None
         width = palette["width"] * scale
         height = palette["height"] * scale
-        left = min(max(mouse_x - width / 2, PALETTE_MARGIN), right - PALETTE_MARGIN - width)
-        bottom = min(
-            max(mouse_y - height / 2, PALETTE_MARGIN),
-            region.height - PALETTE_MARGIN - PALETTE_HEADER - height,
-        )
-        return cls(palette, region, left, bottom, scale)
+        # 모델링 화면 중앙을 가리지 않도록 3D 뷰 우측 하단에 띄운다.
+        return cls(palette, region, right - PALETTE_MARGIN - width, PALETTE_MARGIN, scale)
 
     def cell_at(self, x: float, y: float):
         # 화면 좌표(아래→위)를 이미지 픽셀(위→아래)로 바꿔 칸을 찾는다.
@@ -2466,6 +2541,26 @@ class PaletteOverlay:
         colors = np.repeat(colors, 6, axis=0)
         return batch_for_shader(shader, 'TRIS', {"pos": positions, "color": colors})
 
+    def build_dot_batches(self, shader):
+        cell_width = self.palette["cell_width"] * self.scale
+        cell_height = self.palette["cell_height"] * self.scale
+        radius = max(2.0, min(cell_width, cell_height) * 0.3)
+        cells = np.asarray(self.used_cells, dtype=np.float32)
+        centers_x = self.left + (cells[:, 0] + 0.5) * cell_width
+        centers_y = self.bottom + self.draw_height - (cells[:, 1] + 0.5) * cell_height
+        angles = np.linspace(0.0, 2.0 * math.pi, 13)
+        batches = []
+        for size in (radius, radius - 1.0):
+            ring = np.stack((np.cos(angles), np.sin(angles)), axis=1) * size
+            # 원마다 중심-호 삼각형 12개
+            triangles = np.concatenate(
+                (np.zeros((12, 1, 2)), ring[:-1, None], ring[1:, None]), axis=1
+            ).reshape(-1, 2)
+            centers = np.stack((centers_x, centers_y), axis=1)
+            positions = (centers[:, None, :] + triangles[None, :, :]).reshape(-1, 2)
+            batches.append(batch_for_shader(shader, 'TRIS', {"pos": positions.astype(np.float32)}))
+        return batches
+
     @staticmethod
     def draw_rect(shader, rect, color) -> None:
         x0, y0, x1, y1 = rect
@@ -2493,6 +2588,13 @@ class PaletteOverlay:
             (0.08, 0.08, 0.08, 0.92),
         )
         self._batch.draw(flat)
+        if self.used_cells:
+            if self._dot_batches is None:
+                self._dot_batches = self.build_dot_batches(uniform)
+            # 어떤 색 위에서도 보이도록 검은 테두리 + 흰 점
+            for batch, color in zip(self._dot_batches, ((0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0, 1.0))):
+                uniform.uniform_float("color", color)
+                batch.draw(uniform)
         # 가리킨 칸은 테두리를 두르고 살짝 키워 보여준다.
         if self.hover is not None:
             x0, y0, x1, y1 = self.cell_rect(self.hover)
@@ -2557,12 +2659,11 @@ class MESH_OT_CatPaletteColor(Operator):
                 + max(r.y - event.mouse_y, 0, event.mouse_y - (r.y + r.height))
             ),
         )
-        overlay = PaletteOverlay.fit(
-            context, palette, region, event.mouse_x - region.x, event.mouse_y - region.y
-        )
+        overlay = PaletteOverlay.fit(context, palette, region)
         if overlay is None:
             self.report({'WARNING'}, "3D 뷰가 너무 작아 팔레트를 띄울 수 없습니다.")
             return {'CANCELLED'}
+        overlay.used_cells = palette_used_cells(palette, palette_uv_points(context, path))
         self._overlay = overlay
         self._region = region
         # 호버 미리보기가 UV를 바로 바꾸므로, 취소할 때 되돌릴 원래 UV를 저장한다.
