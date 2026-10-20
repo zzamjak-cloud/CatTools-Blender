@@ -19,6 +19,7 @@ CatTools는 CAT 블록 모델링 작업에 사용해 온 **Woody Tools**의 최�
 - Select Normal: Edit 모드에서 활성 요소(없으면 선택 요소 평균)와 월드 노멀 방향이 같은 면·선·점을 모두 선택. 면이 축에 맞지 않게 회전돼 있어도 같은 방향을 보는 면을 고를 수 있고, Adjust Last Operation 패널의 Angle(기본 1°)로 허용 각도를 조절하고, Connected(기본 켜짐)로 기준과 맞닿아 이어진 같은 방향 요소만 선택하도록 한정(끄면 떨어진 요소까지 모두 선택). Object 모드에서는 활성 오브젝트와 월드 회전이 같은 오브젝트를 선택
 - Select Hidden: Edit 모드에서 어느 방향에서도 보이지 않는 은면(블록끼리 맞닿은 면, 다른 형상 안에 갇힌 면 등)을 선택만 하고 삭제는 하지 않음. 면 전체에 고르게 깐 지점에서 바깥쪽으로 광선을 쏴 하나도 빠져나가지 못한 면만 고르므로 일부라도 보이는 면은 제외. Adjust Last Operation 패널의 Samples(광선 방향 수), Face Samples(면 위 검사 지점 밀도, 기본 4)와 Other Objects(다른 보이는 메쉬 오브젝트도 가림체로 사용, 기본 켜짐)로 조절
 - Palette Color: Edit 모드에서 면을 선택하고 Palette의 Color를 누르거나 Alt+C(Edit 모드 단축키)를 누르면 3D 뷰 우측 하단에 컬러 스와치 이미지가 뜨고, 클릭한 색 칸의 중앙으로 선택 면의 모든 UV 점을 옮김. 마우스를 올린 칸의 색이 실시간으로 모델에 미리 적용되며, Esc·우클릭·팔레트 밖 클릭은 원래 UV로 되돌림. 스와치에는 보이는 메쉬들이 이미 쓰고 있는 색 칸 중앙에 점이 찍힘(팔레트 이미지를 쓰는 머티리얼의 메쉬가 있으면 그 메쉬만, 없으면 보이는 모든 메쉬의 활성 UV 기준). 칸 격자는 이미지에서 자동 인식하고(색 경계의 최대공약수), 이미지 경로는 사이드바 Color 버튼 아래 또는 애드온 환경설정에서 바꿈 (UV 레이어가 없으면 새로 만듦)
+- Merge Edges: Edit 모드에서 서로 다른 면에 속해 마주보는 두 선을 선택하고 Edge의 Merge를 누르거나 Ctrl+Alt+E(Edit 모드 단축키)를 누르면, Bridge Edge Loops 후 Collapse한 것처럼 두 선이 정중앙의 한 선으로 합쳐짐(양쪽 면이 그 선을 공유). 선 수가 같은 두 선 줄·닫힌 루프도 가장 가까운 정점끼리 짝지어 한 번에 합치고, 꼭짓점 하나를 공유하는 V자 두 선은 벌어진 끝을 합쳐 틈을 닫음. 짝을 정할 수 없는 선택(선 줄이 3개 이상, 선 수가 다름, 갈래가 있음)은 아무것도 바꾸지 않음
 - Align 축약 버튼: 활성 오브젝트를 기준으로 선택 오브젝트의 Loc·Rot·Sca를 X·Y·Z·All 축별 정렬
 - 기본 머티리얼 생성
 - 양면 텍스처 및 2·3·4 텍스처 셰이더 구성
@@ -124,6 +125,7 @@ N 키 사이드바 토글과 CatTools 탭 활성화를 확인하려면 창이 �
 
 ```bash
 ./scripts/dev_run.sh --background --python tests/blender_palette_smoke.py
+./scripts/dev_run.sh --background --python tests/blender_merge_edges_smoke.py
 ./scripts/dev_run.sh --enable-event-simulate --python tests/blender_palette_gui_smoke.py
 ```
 

@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 10, 0),
+    "version": (1, 11, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -389,6 +389,12 @@ class OBJECT_PT_WoodyTool(Panel):
         row = column.row(align=True)
         row.operator(OBJECT_OT_CatSelectSameNormal.bl_idname, text="Normal")
         row.operator(OBJECT_OT_CatSelectHiddenFaces.bl_idname, text="Hidden")
+
+        layout.separator(factor=1)
+
+    # 선: 마주보는 두 선을 정중앙의 한 선으로 합친다 (Edit 모드 전용)
+        layout.label(text="Edge :", icon='EDGESEL')
+        layout.operator(MESH_OT_CatMergeEdges.bl_idname, text="Merge (Ctrl+Alt+E)", icon='AUTOMERGE_ON')
 
         layout.separator(factor=1)
 
@@ -2225,6 +2231,129 @@ class OBJECT_OT_CatSelectHiddenFaces(Operator):
         return True
 
 
+# 마주보는 선 합치기 --------------------------------------------------------------
+
+def edge_chains(edges):
+    """선을 이어진 묶음마다 (정점 순서 목록, 닫힘 여부)로 만든다. 갈래가 있으면 None."""
+    links = {}
+    for edge in edges:
+        for vert in edge.verts:
+            links.setdefault(vert, []).append(edge)
+    if any(len(vert_edges) > 2 for vert_edges in links.values()):
+        return None
+    chains = []
+    visited = set()
+    # 열린 묶음은 끝점에서 출발해야 한 줄로 이어진다.
+    starts = sorted(links, key=lambda vert: len(links[vert]))
+    for start in starts:
+        if start in visited:
+            continue
+        verts = [start]
+        visited.add(start)
+        previous_edge = None
+        current = start
+        while True:
+            next_edge = next((edge for edge in links[current] if edge is not previous_edge), None)
+            if next_edge is None:
+                break
+            following = next_edge.other_vert(current)
+            if following in visited:
+                break
+            verts.append(following)
+            visited.add(following)
+            previous_edge, current = next_edge, following
+        closed = len(verts) > 2 and len(links[start]) == 2
+        chains.append((verts, closed))
+    return chains
+
+
+def chain_distance(first, second) -> float:
+    return sum((a.co - b.co).length_squared for a, b in zip(first, second))
+
+
+def pair_chain_verts(chains):
+    """선 묶음의 정점을 마주보는 짝으로 묶는다. 합칠 수 없는 구성이면 None."""
+    if len(chains) == 1:
+        # 꼭짓점 하나를 공유하는 V자 선은 가운데 정점을 기준으로 접어 양 끝을 짝짓는다.
+        verts, closed = chains[0]
+        if closed or len(verts) < 3 or len(verts) % 2 == 0:
+            return None
+        half = len(verts) // 2
+        return [(verts[index], verts[-1 - index]) for index in range(half)]
+    if len(chains) != 2:
+        return None
+    (first, first_closed), (second, second_closed) = chains
+    if len(first) != len(second) or first_closed != second_closed:
+        return None
+    candidates = [second, second[::-1]]
+    if first_closed:
+        # 닫힌 루프는 시작점과 방향을 모두 바꿔 가며 가장 가까운 정렬을 고른다.
+        candidates = [
+            sequence[offset:] + sequence[:offset]
+            for sequence in candidates
+            for offset in range(len(sequence))
+        ]
+    best = min(candidates, key=lambda sequence: chain_distance(first, sequence))
+    return list(zip(first, best))
+
+
+def merge_vert_pairs(bm, pairs) -> list:
+    """짝지은 정점을 두 점의 정중앙으로 합치고, 남은 정점 목록을 돌려준다."""
+    targetmap = {}
+    kept = []
+    for keep, remove in pairs:
+        keep.co = (keep.co + remove.co) * 0.5
+        targetmap[remove] = keep
+        kept.append(keep)
+    bmesh.ops.weld_verts(bm, targetmap=targetmap)
+    return kept
+
+
+class MESH_OT_CatMergeEdges(Operator):
+    """마주보는 두 선(또는 같은 수의 선으로 된 두 선 줄·루프)을 정중앙의 한 선으로 합칩니다. Bridge Edge Loops 후 Collapse한 것과 같습니다."""
+    bl_idname = "mesh.cat_merge_edges"
+    bl_label = "Merge Edges"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'EDIT_MESH'
+
+    def execute(self, context) -> Set[str]:
+        plans = []
+        for obj in edit_mesh_objects(context):
+            bm = bmesh.from_edit_mesh(obj.data)
+            edges = [edge for edge in bm.edges if edge.select and not edge.hide]
+            if not edges:
+                continue
+            chains = edge_chains(edges)
+            pairs = pair_chain_verts(chains) if chains is not None else None
+            if pairs is None:
+                self.report(
+                    {'WARNING'},
+                    f"{obj.name}: 마주보는 두 선(또는 선 수가 같은 두 선 줄)을 선택하세요.",
+                )
+                return {'CANCELLED'}
+            plans.append((obj, bm, pairs))
+        if not plans:
+            self.report({'WARNING'}, "합칠 두 선을 선택하세요.")
+            return {'CANCELLED'}
+
+        merged = 0
+        for obj, bm, pairs in plans:
+            kept = set(merge_vert_pairs(bm, pairs))
+            for vert in kept:
+                vert.select = True
+            for edge in bm.edges:
+                if edge.verts[0] in kept and edge.verts[1] in kept:
+                    edge.select = True
+            bm.select_flush_mode()
+            bmesh.update_edit_mesh(obj.data)
+            merged += len(pairs)
+        self.report({'INFO'}, f"정점 {merged}쌍을 정중앙으로 합쳤습니다.")
+        return {'FINISHED'}
+
+
 # 컬러 팔레트 UV ------------------------------------------------------------------
 
 DEFAULT_PALETTE_PATH = "/Users/woody/dev/Godo_Project/Civilization_Merge/assets/ui/palette/palette.png"
@@ -2759,6 +2888,8 @@ def register_keymaps() -> None:
     keymap = keyconfig.keymaps.new(name="Mesh", space_type='EMPTY')
     item = keymap.keymap_items.new(MESH_OT_CatPaletteColor.bl_idname, 'C', 'PRESS', alt=True)
     addon_keymaps.append((keymap, item))
+    item = keymap.keymap_items.new(MESH_OT_CatMergeEdges.bl_idname, 'E', 'PRESS', ctrl=True, alt=True)
+    addon_keymaps.append((keymap, item))
 
 
 def unregister_keymaps() -> None:
@@ -2776,6 +2907,7 @@ classes = [
     OBJECT_OT_CatSelectSameNormal,
     OBJECT_OT_CatSelectHiddenFaces,
     MESH_OT_CatPaletteColor,
+    MESH_OT_CatMergeEdges,
     # OBJECT_PT_Spacing,
     # OBJECT_PT_Mirror_Modifier,
     # Add_Cylinder_6,

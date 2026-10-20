@@ -27,6 +27,7 @@ ALIGN_SMOKE_PATH = ROOT / "tests" / "blender_align_smoke.py"
 CATOON_SMOKE_PATH = ROOT / "tests" / "blender_catoon_smoke.py"
 SIDEBAR_SMOKE_PATH = ROOT / "tests" / "blender_sidebar_smoke.py"
 PALETTE_SMOKE_PATH = ROOT / "tests" / "blender_palette_smoke.py"
+MERGE_EDGES_SMOKE_PATH = ROOT / "tests" / "blender_merge_edges_smoke.py"
 
 EXPECTED_REGISTERED_CLASSES = [
     "CatToolsPreferences",
@@ -37,6 +38,7 @@ EXPECTED_REGISTERED_CLASSES = [
     "OBJECT_OT_CatSelectSameNormal",
     "OBJECT_OT_CatSelectHiddenFaces",
     "MESH_OT_CatPaletteColor",
+    "MESH_OT_CatMergeEdges",
     "CircleArray",
     "Add_Material",
     "SHADER_OP_Blend2Tex",
@@ -132,7 +134,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], "1.0.0")
         self.assertEqual(manifest["id"], "cat_tools")
         self.assertEqual(manifest["name"], "CatTools")
-        self.assertEqual(manifest["version"], "1.10.0")
+        self.assertEqual(manifest["version"], "1.11.0")
         self.assertEqual(manifest["blender_version_min"], "4.2.0")
         self.assertIn("SPDX:GPL-3.0-or-later", manifest["license"])
 
@@ -145,7 +147,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         info = ast.literal_eval(info_node.value)
         self.assertEqual(info["name"], "CatTools")
-        self.assertEqual(info["version"], (1, 10, 0))
+        self.assertEqual(info["version"], (1, 11, 0))
         self.assertEqual(info["blender"], (4, 2, 0))
 
     def test_registered_class_order(self) -> None:
@@ -453,6 +455,22 @@ class CatToolsSmokeTest(unittest.TestCase):
             module_constant(self.tree, "DEFAULT_PALETTE_PATH"),
             "/Users/woody/dev/Godo_Project/Civilization_Merge/assets/ui/palette/palette.png",
         )
+
+    def test_merge_edges_button_and_shortcut(self) -> None:
+        panel = self.classes["OBJECT_PT_WoodyTool"]
+        draw = next(
+            node
+            for node in panel.body
+            if isinstance(node, ast.FunctionDef) and node.name == "draw"
+        )
+        self.assertIn("MESH_OT_CatMergeEdges.bl_idname, text='Merge (Ctrl+Alt+E)'", ast.unparse(draw))
+        self.assertIn(
+            "keymap_items.new(MESH_OT_CatMergeEdges.bl_idname, 'E', 'PRESS', ctrl=True, alt=True)",
+            self.source,
+        )
+        source = MERGE_EDGES_SMOKE_PATH.read_text(encoding="utf-8")
+        compile(source, str(MERGE_EDGES_SMOKE_PATH), "exec")
+        self.assertIn("bpy.ops.mesh.cat_merge_edges(", source)
 
     def test_palette_runtime_smoke_syntax(self) -> None:
         source = PALETTE_SMOKE_PATH.read_text(encoding="utf-8")

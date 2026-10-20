@@ -71,7 +71,8 @@ def assert_shortcut_registered(addon) -> None:
     assert bindings == [(SHORTCUT_IDNAME, SHORTCUT_KEY)], (
         f"{SHORTCUT_KEY} 키 단축키가 등록되지 않았습니다: {bindings}"
     )
-    assert len(addon.addon_keymaps) == 1, (
+    sidebar_items = [item for _keymap, item in addon.addon_keymaps if item.idname == SHORTCUT_IDNAME]
+    assert len(sidebar_items) == 1, (
         f"해제용 키맵 목록이 예상과 다릅니다: {addon.addon_keymaps}"
     )
 
