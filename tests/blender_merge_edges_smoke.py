@@ -124,7 +124,27 @@ def main() -> None:
         assert (len(bm.verts), len(bm.edges)) == (count, count), (len(bm.verts), len(bm.edges))
         assert all(abs(vert.co.z - 0.1) < 1e-5 and abs(vert.co.xy.length - 1) < 1e-5 for vert in bm.verts)
 
-        # 5) 짝을 정할 수 없는 선택(떨어진 선 세 개, 선 수가 다른 두 줄)은 아무것도 바꾸지 않는다.
+        # 5) 4x1 격자 두 장의 마주보는 경계 줄(선 4개씩)과, 떨어진 곳의 또 다른 선 한 쌍을 한 번에 합친다.
+        verts, faces = [], []
+        for x0 in (0.0, 1.2):
+            base = len(verts)
+            verts += [(x0 + dx, y, 0) for y in range(5) for dx in (0, 1)]
+            faces += [(base + 2 * y, base + 2 * y + 1, base + 2 * y + 3, base + 2 * y + 2) for y in range(4)]
+        base = len(verts)
+        verts += [(0, 10, 0), (1, 10, 0), (1, 11, 0), (0, 11, 0), (1.3, 10, 0), (2.3, 10, 0), (2.3, 11, 0), (1.3, 11, 0)]
+        faces += [(base, base + 1, base + 2, base + 3), (base + 4, base + 5, base + 6, base + 7)]
+        obj = make_mesh("Rows", verts, faces=faces)
+        left_row = [(2 * y + 1, 2 * y + 3) for y in range(4)]
+        right_row = [(10 + 2 * y, 10 + 2 * y + 2) for y in range(4)]
+        select_edges(obj, left_row + right_row + [(base + 1, base + 2), (base + 4, base + 7)])
+        assert bpy.ops.mesh.cat_merge_edges() == {"FINISHED"}
+        bm = bmesh.from_edit_mesh(obj.data)
+        assert len(bm.verts) == 28 - 5 - 2, len(bm.verts)
+        merged_x = sorted({round(vert.co.x, 5) for vert in bm.verts if vert.select})
+        assert merged_x == [1.1, 1.15], merged_x
+        assert sum(1 for edge in bm.edges if len(edge.link_faces) == 2) == 3 * 2 + 4 + 1
+
+        # 6) 짝을 정할 수 없는 선택(떨어진 선 세 개, 선 수가 다른 두 줄)은 아무것도 바꾸지 않는다.
         obj = make_mesh(
             "Invalid",
             [(0, 0, 0), (0, 1, 0), (1, 0, 0), (1, 1, 0), (2, 0, 0), (2, 1, 0), (2, 2, 0)],

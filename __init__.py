@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 11, 0),
+    "version": (1, 12, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -2280,9 +2280,29 @@ def pair_chain_verts(chains):
             return None
         half = len(verts) // 2
         return [(verts[index], verts[-1 - index]) for index in range(half)]
-    if len(chains) != 2:
+    if len(chains) % 2:
         return None
-    (first, first_closed), (second, second_closed) = chains
+    # 선 수가 같은 묶음끼리 가장 가까운 짝부터 맺어, 여러 쌍의 선·선 줄·루프를 한 번에 합친다.
+    matches = []
+    for i, first in enumerate(chains):
+        for j in range(i + 1, len(chains)):
+            match = align_chains(first, chains[j])
+            if match is not None:
+                matches.append((match[0], i, j, match[1]))
+    matches.sort(key=lambda match: match[0])
+    used = set()
+    pairs = []
+    for _distance, i, j, chain_pairs in matches:
+        if i in used or j in used:
+            continue
+        used.update((i, j))
+        pairs.extend(chain_pairs)
+    return pairs if len(used) == len(chains) else None
+
+
+def align_chains(first_chain, second_chain):
+    """두 선 묶음을 가장 가깝게 맞춘 (거리, 정점 짝)을 돌려준다. 선 수나 닫힘이 다르면 None."""
+    (first, first_closed), (second, second_closed) = first_chain, second_chain
     if len(first) != len(second) or first_closed != second_closed:
         return None
     candidates = [second, second[::-1]]
@@ -2294,7 +2314,7 @@ def pair_chain_verts(chains):
             for offset in range(len(sequence))
         ]
     best = min(candidates, key=lambda sequence: chain_distance(first, sequence))
-    return list(zip(first, best))
+    return chain_distance(first, best), list(zip(first, best))
 
 
 def merge_vert_pairs(bm, pairs) -> list:
@@ -2331,7 +2351,7 @@ class MESH_OT_CatMergeEdges(Operator):
             if pairs is None:
                 self.report(
                     {'WARNING'},
-                    f"{obj.name}: 마주보는 두 선(또는 선 수가 같은 두 선 줄)을 선택하세요.",
+                    f"{obj.name}: 선 수가 같은 선·선 줄·루프를 마주보는 쌍으로 선택하세요.",
                 )
                 return {'CANCELLED'}
             plans.append((obj, bm, pairs))
