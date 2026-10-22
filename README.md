@@ -85,6 +85,12 @@ BLENDER_VERSION=5.3 BLENDER_BIN="/Applications/Blender 5.3.app/Contents/MacOS/Bl
 ./scripts/dev_run.sh --background --python tests/blender_mirror_smoke.py
 ```
 
+Modifier Apply의 활성화 조건과 모디파이어 적용을 확인하려면 다음 검사를 실행합니다.
+
+```bash
+./scripts/dev_run.sh --background --python tests/blender_apply_modifiers_smoke.py
+```
+
 Align 연산자의 축별 정렬과 비오일러 rotation_mode 처리를 확인하려면 다음 검사를 실행합니다.
 
 ```bash

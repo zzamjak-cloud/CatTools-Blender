@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 12, 0),
+    "version": (1, 13, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -438,6 +438,9 @@ class OBJECT_PT_WoodyTool(Panel):
 
         # 모디파이어
         layout.label(text="Modifier :", icon= 'MODIFIER_DATA')
+
+        # 선택 오브젝트에 모디파이어가 없으면 poll이 버튼을 비활성화한다.
+        layout.operator(OBJECT_OT_CatApplyModifiers.bl_idname, text=OBJECT_OT_CatApplyModifiers.bl_label, icon='CHECKMARK')
 
         row = layout.row()
         row.operator(Add_Lattice.bl_idname, text= Add_Lattice.bl_label, icon= 'MOD_LATTICE')
@@ -1511,6 +1514,57 @@ class Add_Mirror_Z_Modifier(MirrorModifierOperator, Operator):
     bl_idname = "wm.add_mirror_z_modifier"
     bl_label = "Z"
     axis_index = 2
+
+
+# 모디파이어가 하나라도 있는 선택 오브젝트 목록
+def objects_with_modifiers(context):
+    return [obj for obj in context.selected_objects if obj.modifiers]
+
+
+class OBJECT_OT_CatApplyModifiers(Operator):
+    """선택한 오브젝트의 모디파이어를 위에서부터 차례로 모두 적용합니다."""
+    bl_idname = "object.cat_apply_modifiers"
+    bl_label = "Apply"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        # 적용할 모디파이어가 없으면 버튼을 비활성화한다.
+        return context.mode in {'OBJECT', 'EDIT_MESH'} and bool(objects_with_modifiers(context))
+
+    def execute(self, context) -> Set[str]:
+        targets = objects_with_modifiers(context)
+        # modifier_apply는 Object 모드에서만 동작하므로 Edit 모드면 잠시 빠져나간다.
+        was_edit = context.mode == 'EDIT_MESH'
+        if was_edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        applied = 0
+        failures = []
+        try:
+            for obj in targets:
+                with context.temp_override(object=obj, active_object=obj):
+                    # 적용하면 목록에서 빠지므로 이름 목록을 먼저 만든다.
+                    for name in [modifier.name for modifier in obj.modifiers]:
+                        try:
+                            # 링크 복제된 메쉬도 이 오브젝트만 단독 데이터로 만들어 적용한다.
+                            result = bpy.ops.object.modifier_apply(modifier=name, single_user=True)
+                        except RuntimeError as error:
+                            failures.append(f"{obj.name}/{name}: {str(error).strip()}")
+                            continue
+                        if result == {'FINISHED'}:
+                            applied += 1
+                        else:
+                            failures.append(f"{obj.name}/{name}")
+        finally:
+            if was_edit:
+                bpy.ops.object.mode_set(mode='EDIT')
+
+        if failures:
+            self.report({'WARNING'}, f"모디파이어 {applied}개 적용, {len(failures)}개 실패: {'; '.join(failures)}")
+        else:
+            self.report({'INFO'}, f"모디파이어 {applied}개를 적용했습니다.")
+        return {'FINISHED'} if applied else {'CANCELLED'}
 
 
 # 정렬 연산자 -----------------------------------------------------------------------------
@@ -2946,6 +3000,7 @@ classes = [
     Add_Mirror_X_Modifier,
     Add_Mirror_Y_Modifier,
     Add_Mirror_Z_Modifier,
+    OBJECT_OT_CatApplyModifiers,
     # Add_Text
 ]
 

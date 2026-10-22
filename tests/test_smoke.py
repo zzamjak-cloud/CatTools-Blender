@@ -28,6 +28,7 @@ CATOON_SMOKE_PATH = ROOT / "tests" / "blender_catoon_smoke.py"
 SIDEBAR_SMOKE_PATH = ROOT / "tests" / "blender_sidebar_smoke.py"
 PALETTE_SMOKE_PATH = ROOT / "tests" / "blender_palette_smoke.py"
 MERGE_EDGES_SMOKE_PATH = ROOT / "tests" / "blender_merge_edges_smoke.py"
+APPLY_MODIFIERS_SMOKE_PATH = ROOT / "tests" / "blender_apply_modifiers_smoke.py"
 
 EXPECTED_REGISTERED_CLASSES = [
     "CatToolsPreferences",
@@ -50,6 +51,7 @@ EXPECTED_REGISTERED_CLASSES = [
     "Add_Mirror_X_Modifier",
     "Add_Mirror_Y_Modifier",
     "Add_Mirror_Z_Modifier",
+    "OBJECT_OT_CatApplyModifiers",
 ]
 
 EXPECTED_IDNAMES = {
@@ -79,6 +81,7 @@ EXPECTED_IDNAMES = {
     "Add_Mirror_X_Modifier": "wm.add_mirror_x_modifier",
     "Add_Mirror_Y_Modifier": "wm.add_mirror_y_modifier",
     "Add_Mirror_Z_Modifier": "wm.add_mirror_z_modifier",
+    "OBJECT_OT_CatApplyModifiers": "object.cat_apply_modifiers",
 }
 
 MIRROR_AXES = {
@@ -134,7 +137,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], "1.0.0")
         self.assertEqual(manifest["id"], "cat_tools")
         self.assertEqual(manifest["name"], "CatTools")
-        self.assertEqual(manifest["version"], "1.12.0")
+        self.assertEqual(manifest["version"], "1.13.0")
         self.assertEqual(manifest["blender_version_min"], "4.2.0")
         self.assertIn("SPDX:GPL-3.0-or-later", manifest["license"])
 
@@ -147,7 +150,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         info = ast.literal_eval(info_node.value)
         self.assertEqual(info["name"], "CatTools")
-        self.assertEqual(info["version"], (1, 12, 0))
+        self.assertEqual(info["version"], (1, 13, 0))
         self.assertEqual(info["blender"], (4, 2, 0))
 
     def test_registered_class_order(self) -> None:
@@ -471,6 +474,18 @@ class CatToolsSmokeTest(unittest.TestCase):
         source = MERGE_EDGES_SMOKE_PATH.read_text(encoding="utf-8")
         compile(source, str(MERGE_EDGES_SMOKE_PATH), "exec")
         self.assertIn("bpy.ops.mesh.cat_merge_edges(", source)
+
+    def test_apply_modifiers_button_is_exposed(self) -> None:
+        panel = self.classes["OBJECT_PT_WoodyTool"]
+        draw = next(
+            node
+            for node in panel.body
+            if isinstance(node, ast.FunctionDef) and node.name == "draw"
+        )
+        self.assertIn("OBJECT_OT_CatApplyModifiers.bl_idname", ast.unparse(draw))
+        source = APPLY_MODIFIERS_SMOKE_PATH.read_text(encoding="utf-8")
+        compile(source, str(APPLY_MODIFIERS_SMOKE_PATH), "exec")
+        self.assertIn("bpy.ops.object.cat_apply_modifiers(", source)
 
     def test_palette_runtime_smoke_syntax(self) -> None:
         source = PALETTE_SMOKE_PATH.read_text(encoding="utf-8")
