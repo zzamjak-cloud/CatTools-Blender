@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 17, 1),
+    "version": (1, 18, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -12,7 +12,7 @@ bl_info = {
     "category": "3D View",
 }
 
-import bpy, math, bmesh, bisect, os, blf, gpu
+import bpy, math, bmesh, bisect, heapq, os, blf, gpu
 import numpy as np
 from typing import Set
 from bpy.types import AddonPreferences, Context, GizmoGroup, Panel, Operator, SpaceView3D
@@ -401,6 +401,12 @@ class OBJECT_PT_WoodyTool(Panel):
     # 선: 마주보는 두 선을 정중앙의 한 선으로 합친다 (Edit 모드 전용)
         layout.label(text="Edge :", icon='EDGESEL')
         layout.operator(MESH_OT_CatMergeEdges.bl_idname, text="Merge (Ctrl+Alt+E)", icon='AUTOMERGE_ON')
+
+        layout.separator(factor=1)
+
+    # 폴리곤: 선택한 면에서 삼각형 두 개 사이의 대각선을 지워 사각형으로 만든다 (Edit 모드 전용)
+        layout.label(text="Polygon :", icon='FACESEL')
+        layout.operator(MESH_OT_CatTrisToQuads.bl_idname, text="Tris to Quads (Ctrl+Alt+J)", icon='MESH_PLANE')
 
         layout.separator(factor=1)
 
@@ -2907,6 +2913,161 @@ class MESH_OT_CatMergeEdges(Operator):
         return {'FINISHED'}
 
 
+# 폴리곤: 삼각형 두 개 사이의 대각선을 지워 사각형으로 만든다 ---------------------------
+
+def triangle_pair_score(edge, max_angle: float, shape_limit: float):
+    """
+    edge를 지워 양쪽 삼각형을 사각형으로 합쳤을 때의 품질 점수. 합칠 수 없으면 None.
+
+    두 면이 이루는 각이 max_angle을 넘거나, 합친 사각형이 오목하거나, 어느 모서리든
+    직각에서 shape_limit보다 벗어나면(구 극점의 삼각형 부채꼴 등) 제외한다.
+    네 모서리가 직각에 가까울수록(진짜 대각선일수록) 점수가 높다.
+    """
+    face_a, face_b = edge.link_faces
+    vert_a, vert_b = edge.verts
+    tip_a = next(vert for vert in face_a.verts if vert not in (vert_a, vert_b))
+    tip_b = next(vert for vert in face_b.verts if vert not in (vert_a, vert_b))
+    if tip_a is tip_b:
+        return None
+    fold = face_a.normal.angle(face_b.normal, 0.0)
+    if fold > max_angle:
+        return None
+    # 합친 사각형의 둘레 순서: vert_a → tip_a → vert_b → tip_b
+    quad = [vert.co for vert in (vert_a, tip_a, vert_b, tip_b)]
+    normal = face_a.normal + face_b.normal
+    if normal.length < 1e-8:
+        return None
+    # 네 모서리가 모두 같은 쪽으로 꺾여야 볼록한 사각형이다. 일직선(180°)·오목 모서리는 제외한다.
+    size = max((quad[index] - quad[index - 1]).length_squared for index in range(4))
+    turns = [
+        (quad[(index + 1) % 4] - quad[index]).cross(quad[index - 1] - quad[index]).dot(normal)
+        for index in range(4)
+    ]
+    limit = size * 1e-4
+    if not (all(turn > limit for turn in turns) or all(turn < -limit for turn in turns)):
+        return None
+    error = 0.0
+    for index in range(4):
+        previous, current, following = quad[index - 1], quad[index], quad[(index + 1) % 4]
+        deviation = abs((previous - current).angle(following - current, 0.0) - math.pi / 2)
+        if deviation > shape_limit:
+            return None
+        error += deviation
+    return 1.0 - error / (2.0 * math.pi) - fold / math.pi
+
+
+def pick_triangle_pairs(triangles, max_angle: float, shape_limit: float):
+    """
+    선택한 삼각형끼리 지울 대각선을 고른다.
+
+    짝 후보가 적은 삼각형부터 가장 점수가 높은 이웃과 짝지어, 가장자리 삼각형이 짝을 잃지 않게 한다.
+    """
+    candidates = {}
+    for face in triangles:
+        options = []
+        for edge in face.edges:
+            if len(edge.link_faces) != 2:
+                continue
+            other = edge.link_faces[0] if edge.link_faces[1] is face else edge.link_faces[1]
+            if other not in triangles:
+                continue
+            score = triangle_pair_score(edge, max_angle, shape_limit)
+            if score is not None:
+                options.append((score, edge, other))
+        if options:
+            candidates[face] = sorted(options, key=lambda option: option[0], reverse=True)
+
+    used = set()
+    chosen = []
+
+    def live_options(face):
+        return [option for option in candidates[face] if option[2] not in used]
+
+    order = sorted(candidates, key=lambda face: face.index)
+    rank = {face: position for position, face in enumerate(order)}
+    heap = [(len(candidates[face]), -candidates[face][0][0], rank[face], face) for face in order]
+    heapq.heapify(heap)
+    while heap:
+        degree, _score, _rank, face = heapq.heappop(heap)
+        if face in used:
+            continue
+        options = live_options(face)
+        if not options:
+            continue
+        if len(options) != degree:
+            # 이웃이 먼저 짝지어져 후보 수가 줄었으면 새 값으로 다시 넣는다.
+            heapq.heappush(heap, (len(options), -options[0][0], rank[face], face))
+            continue
+        _best, edge, other = options[0]
+        used.update((face, other))
+        chosen.append(edge)
+        for _score, _edge, neighbor in candidates.get(other, []):
+            if neighbor not in used:
+                remaining = live_options(neighbor)
+                if remaining:
+                    heapq.heappush(heap, (len(remaining), -remaining[0][0], rank[neighbor], neighbor))
+    return chosen
+
+
+class MESH_OT_CatTrisToQuads(Operator):
+    """선택한 면 중 이웃한 삼각형 두 개 사이의 대각선을 지워 사각형으로 만듭니다. 사각형·N각형이 섞여 있어도 삼각형만 골라 짝짓습니다."""
+    bl_idname = "mesh.cat_tris_to_quads"
+    bl_label = "Tris to Quads"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    max_angle: FloatProperty(
+        name="Max Angle",
+        description="두 삼각형이 이루는 각이 이 값보다 크면(접힌 곳) 합치지 않습니다",
+        subtype='ANGLE',
+        default=math.radians(40.0),
+        min=0.0,
+        max=math.pi,
+    ) # type: ignore
+    shape_limit: FloatProperty(
+        name="Shape Limit",
+        description="합친 사각형의 어느 모서리든 직각에서 이 값보다 벗어나면 합치지 않습니다. 90°면 볼록하기만 하면 합칩니다",
+        subtype='ANGLE',
+        default=math.radians(60.0),
+        min=0.0,
+        max=math.pi / 2,
+    ) # type: ignore
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'EDIT_MESH'
+
+    def execute(self, context) -> Set[str]:
+        joined = 0
+        left = 0
+        found = False
+        for obj in edit_mesh_objects(context):
+            bm = bmesh.from_edit_mesh(obj.data)
+            bm.faces.index_update()
+            triangles = {face for face in bm.faces if face.select and not face.hide and len(face.verts) == 3}
+            if not triangles:
+                continue
+            found = True
+            edges = pick_triangle_pairs(triangles, self.max_angle, self.shape_limit)
+            if edges:
+                # 대각선을 지운 사각형도 선택 상태로 남긴다 (face_join이 새 면을 돌려준다).
+                for edge in edges:
+                    face = bmesh.utils.face_join(list(edge.link_faces))
+                    if face is not None:
+                        face.select = True
+                bm.select_flush_mode()
+                bmesh.update_edit_mesh(obj.data)
+            joined += len(edges)
+            left += len(triangles) - 2 * len(edges)
+        if not found:
+            self.report({'WARNING'}, "삼각형이 포함된 면을 선택하세요.")
+            return {'CANCELLED'}
+        message = f"삼각형 {joined}쌍을 사각형으로 합쳤습니다."
+        if left:
+            message += f" 짝을 찾지 못한 삼각형 {left}개는 남겼습니다."
+        self.report({'INFO'}, message)
+        return {'FINISHED'}
+
+
 # 컬러 팔레트 UV ------------------------------------------------------------------
 
 DEFAULT_PALETTE_PATH = "/Users/woody/dev/Godo_Project/Civilization_Merge/assets/ui/palette/palette.png"
@@ -3469,6 +3630,9 @@ def register_keymaps() -> None:
     addon_keymaps.append((keymap, item))
     item = keymap.keymap_items.new(MESH_OT_CatMergeEdges.bl_idname, 'E', 'PRESS', ctrl=True, alt=True)
     addon_keymaps.append((keymap, item))
+    # 기본 Alt+J(Tris to Quads) 옆에 둔다. Ctrl+Alt+J는 기본 키맵에서 비어 있다.
+    item = keymap.keymap_items.new(MESH_OT_CatTrisToQuads.bl_idname, 'J', 'PRESS', ctrl=True, alt=True)
+    addon_keymaps.append((keymap, item))
 
 
 def unregister_keymaps() -> None:
@@ -3487,6 +3651,7 @@ classes = [
     OBJECT_OT_CatSelectHiddenFaces,
     MESH_OT_CatPaletteColor,
     MESH_OT_CatMergeEdges,
+    MESH_OT_CatTrisToQuads,
     # OBJECT_PT_Spacing,
     # OBJECT_PT_Mirror_Modifier,
     # Add_Cylinder_6,

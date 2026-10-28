@@ -28,6 +28,7 @@ CATOON_SMOKE_PATH = ROOT / "tests" / "blender_catoon_smoke.py"
 SIDEBAR_SMOKE_PATH = ROOT / "tests" / "blender_sidebar_smoke.py"
 PALETTE_SMOKE_PATH = ROOT / "tests" / "blender_palette_smoke.py"
 MERGE_EDGES_SMOKE_PATH = ROOT / "tests" / "blender_merge_edges_smoke.py"
+TRIS_TO_QUADS_SMOKE_PATH = ROOT / "tests" / "blender_tris_to_quads_smoke.py"
 APPLY_MODIFIERS_SMOKE_PATH = ROOT / "tests" / "blender_apply_modifiers_smoke.py"
 CIRCLE_ARRAY_SMOKE_PATH = ROOT / "tests" / "blender_circle_array_smoke.py"
 LATTICE_SMOKE_PATH = ROOT / "tests" / "blender_lattice_smoke.py"
@@ -42,6 +43,7 @@ EXPECTED_REGISTERED_CLASSES = [
     "OBJECT_OT_CatSelectHiddenFaces",
     "MESH_OT_CatPaletteColor",
     "MESH_OT_CatMergeEdges",
+    "MESH_OT_CatTrisToQuads",
     "CircleArray",
     "Add_Material",
     "SHADER_OP_Blend2Tex",
@@ -141,7 +143,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], "1.0.0")
         self.assertEqual(manifest["id"], "cat_tools")
         self.assertEqual(manifest["name"], "CatTools")
-        self.assertEqual(manifest["version"], "1.17.1")
+        self.assertEqual(manifest["version"], "1.18.0")
         self.assertEqual(manifest["blender_version_min"], "4.2.0")
         self.assertIn("SPDX:GPL-3.0-or-later", manifest["license"])
 
@@ -154,7 +156,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         info = ast.literal_eval(info_node.value)
         self.assertEqual(info["name"], "CatTools")
-        self.assertEqual(info["version"], (1, 17, 1))
+        self.assertEqual(info["version"], (1, 18, 0))
         self.assertEqual(info["blender"], (4, 2, 0))
 
     def test_registered_class_order(self) -> None:
@@ -478,6 +480,23 @@ class CatToolsSmokeTest(unittest.TestCase):
         source = MERGE_EDGES_SMOKE_PATH.read_text(encoding="utf-8")
         compile(source, str(MERGE_EDGES_SMOKE_PATH), "exec")
         self.assertIn("bpy.ops.mesh.cat_merge_edges(", source)
+
+    def test_tris_to_quads_button_and_shortcut(self) -> None:
+        panel = self.classes["OBJECT_PT_WoodyTool"]
+        draw = next(
+            node
+            for node in panel.body
+            if isinstance(node, ast.FunctionDef) and node.name == "draw"
+        )
+        self.assertIn("text='Polygon :'", ast.unparse(draw))
+        self.assertIn("MESH_OT_CatTrisToQuads.bl_idname, text='Tris to Quads (Ctrl+Alt+J)'", ast.unparse(draw))
+        self.assertIn(
+            "keymap_items.new(MESH_OT_CatTrisToQuads.bl_idname, 'J', 'PRESS', ctrl=True, alt=True)",
+            self.source,
+        )
+        source = TRIS_TO_QUADS_SMOKE_PATH.read_text(encoding="utf-8")
+        compile(source, str(TRIS_TO_QUADS_SMOKE_PATH), "exec")
+        self.assertIn("bpy.ops.mesh.cat_tris_to_quads(", source)
 
     def test_apply_modifiers_button_is_exposed(self) -> None:
         panel = self.classes["OBJECT_PT_WoodyTool"]
