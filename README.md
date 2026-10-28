@@ -12,7 +12,8 @@ CatTools는 CAT 블록 모델링 작업에 사용해 온 **Woody Tools**의 최�
 - N 키 사이드바 단축키: 사이드바를 열 때 CatTools 탭을 활성 탭으로 지정 (사이드바가 열린 상태로 저장된 파일도 파일 로드 시 CatTools 탭으로 복원). 탭 목록에서 Item·Tool·View는 Blender 내부에 정의되어 있어 CatTools를 그 위로 옮길 수는 없고, 활성 탭만 지정한다.
 - Transform 축약 필드: Loc·Rot·Sca를 각각 한 줄 3열 그리드로 표시하며, 사이드바가 좁아지면 라벨을 L·R·S로 축약
 - Edit 모드 Transform: 선택한 점·선·면의 중앙값 위치(월드)를 표시·편집하고, Rot·Sca는 중앙값 기준으로 선택 요소를 회전·스케일 (선택이 바뀌거나 Undo하면 0/1로 초기화)
-- 3D Cursor 축약 필드: View 탭의 3D 커서 Loc·Rot을 Transform과 같은 한 줄 3열 그리드로 표시 (쿼터니언/축-각도 모드는 4열)
+- 3D Cursor 축약 필드: View 탭의 3D 커서 Loc·Rot을 Transform과 같은 한 줄 3열 그리드로 표시 (쿼터니언/축-각도 모드는 4열). 제목 옆 체크박스로 3D 커서 표시를 켜고 끔
+- 빠른 열기: 시작·파일 열기 시 사이드바를 CatTools 탭으로 자동으로 열고(환경설정 Open Sidebar on Start), 3D 뷰 헤더 우측 CatTools 버튼이나 N 키로 여닫음
 - Select X·Y·Z: 활성 오브젝트와 해당 축의 피벗(원점) 월드 좌표가 같은 오브젝트를 모두 선택 (Redo 패널에서 허용 오차·기존 선택 유지 조정)
 - Edit 모드 Select X·Y·Z: 현재 선택 모드(점·선·면)에서 선택된 요소 각각의 해당 축 월드 좌표를 기준으로, 그중 하나와 같은 요소를 모두 선택 (여러 면을 선택하면 면마다의 축 값이 모두 기준). 면 모드에서는 Match Normal(기본 켜짐)로 축 값뿐 아니라 노멀 방향도 같은 면만 선택해, 높이만 같은 옆면 등은 제외
 - Select +X·+Y·+Z / -X·-Y·-Z: 기준(활성 오브젝트 피벗, Edit 모드는 선택된 요소 각각이며 결과는 합쳐짐)을 포함해 해당 축의 양(+)·음(-) 방향에 있는 오브젝트·점·선·면을 모두 선택. 실행 후 3D View 좌하단 Adjust Last Operation 패널의 Distance로 기준에서 얼마나 떨어진 곳부터 선택할지 조절 (0보다 크면 기준 자신은 제외)
@@ -89,6 +90,18 @@ Modifier Apply의 활성화 조건과 모디파이어 적용을 확인하려면 
 
 ```bash
 ./scripts/dev_run.sh --background --python tests/blender_apply_modifiers_smoke.py
+```
+
+Lattice의 형상 맞춤과 축별 해상도를 확인하려면 다음 검사를 실행합니다.
+
+```bash
+./scripts/dev_run.sh --background --python tests/blender_lattice_smoke.py
+```
+
+Circle Array의 Facing(Center/Outward)·Front Axis·Rotation 옵션을 확인하려면 다음 검사를 실행합니다.
+
+```bash
+./scripts/dev_run.sh --background --python tests/blender_circle_array_smoke.py
 ```
 
 Align 연산자의 축별 정렬과 비오일러 rotation_mode 처리를 확인하려면 다음 검사를 실행합니다.

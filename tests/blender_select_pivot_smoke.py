@@ -315,6 +315,68 @@ def check_edit_mesh_normals() -> None:
     remove_all_objects()
 
 
+def check_multiple_normals() -> None:
+    # 떨어진 큐브 두 개에서 윗면과 옆면을 함께 선택하면 두 방향 모두를 기준으로 삼는다.
+    bm_source = bmesh.new()
+    for offset in (Vector((-2.0, 0.0, 0.0)), Vector((2.0, 0.0, 0.0))):
+        bmesh.ops.create_cube(bm_source, size=1.0, matrix=Matrix.Translation(offset))
+    mesh = bpy.data.meshes.new("MultiNormal")
+    bm_source.to_mesh(mesh)
+    bm_source.free()
+    obj = bpy.data.objects.new("MultiNormal", mesh)
+    bpy.context.collection.objects.link(obj)
+    bpy.ops.object.select_all(action="DESELECT")
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.context.tool_settings.mesh_select_mode = (False, False, True)
+
+    bm = bmesh.from_edit_mesh(obj.data)
+    for element in (*bm.verts, *bm.edges, *bm.faces):
+        element.select = False
+    left = [f for f in bm.faces if f.calc_center_median().x < 0.0]
+    top = next(f for f in left if f.normal.z > 0.99)
+    side = next(f for f in left if f.normal.y > 0.99)
+    top.select_set(True)
+    side.select_set(True)
+    bm.select_history.clear()
+    bm.select_history.add(side)
+    bmesh.update_edit_mesh(obj.data)
+
+    assert bpy.ops.object.cat_select_same_normal(connected=False) == {"FINISHED"}
+    selected = [f for f in bm.faces if f.select]
+    assert len(selected) == 4, f"두 방향(+Z, +Y)의 면 4개가 선택돼야 합니다: {len(selected)}"
+    assert all(f.normal.z > 0.99 or f.normal.y > 0.99 for f in selected)
+
+    # Connected면 서로 맞닿은 윗면·옆면이라도 각자 방향으로만 넓혀 기준 큐브의 두 면만 남는다.
+    for f in bm.faces:
+        f.select = False
+    top.select_set(True)
+    side.select_set(True)
+    bmesh.update_edit_mesh(obj.data)
+    assert bpy.ops.object.cat_select_same_normal() == {"FINISHED"}
+    assert {f for f in bm.faces if f.select} == {top, side}
+    remove_all_objects()
+
+    # Object 모드: 30도 오브젝트와 45도 오브젝트를 함께 선택하면 두 회전 모두 기준이 된다.
+    a = create_empty("MultiA", (0.0, 0.0, 0.0))
+    b = create_empty("MultiB", (3.0, 0.0, 0.0))
+    c = create_empty("MultiC", (6.0, 0.0, 0.0))
+    d = create_empty("MultiD", (9.0, 0.0, 0.0))
+    a.rotation_euler = (0.0, 0.0, math.radians(30.0))
+    b.rotation_euler = (0.0, 0.0, math.radians(30.0))
+    c.rotation_euler = (0.0, 0.0, math.radians(45.0))
+    d.rotation_euler = (0.0, 0.0, math.radians(45.0))
+    bpy.context.view_layer.update()
+    bpy.ops.object.select_all(action="DESELECT")
+    a.select_set(True)
+    c.select_set(True)
+    bpy.context.view_layer.objects.active = a
+    assert bpy.ops.object.cat_select_same_normal() == {"FINISHED"}
+    assert selected_names() == {"MultiA", "MultiB", "MultiC", "MultiD"}, selected_names()
+    remove_all_objects()
+
+
 def check_object_rotation() -> None:
     a = create_empty("RotA", (0.0, 0.0, 0.0))
     b = create_empty("RotB", (3.0, 0.0, 0.0))
@@ -399,6 +461,7 @@ def main() -> None:
         check_edit_mesh_verts()
         check_edit_mesh_normals()
         check_object_rotation()
+        check_multiple_normals()
     finally:
         remove_all_objects()
         if registered_here:

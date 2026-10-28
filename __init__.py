@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 13, 0),
+    "version": (1, 14, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -16,7 +16,7 @@ import bpy, math, bmesh, bisect, os, blf, gpu
 import numpy as np
 from typing import Set
 from bpy.types import AddonPreferences, Context, Panel, Operator, SpaceView3D
-from bpy.props import StringProperty, FloatProperty, BoolProperty, IntProperty, EnumProperty
+from bpy.props import StringProperty, FloatProperty, FloatVectorProperty, BoolProperty, IntProperty, EnumProperty
 from mathutils import Euler, Matrix, Quaternion, Vector
 from mathutils.bvhtree import BVHTree
 from mathutils.geometry import tessellate_polygon
@@ -341,9 +341,15 @@ class OBJECT_PT_WoodyTool(Panel):
         layout.separator(factor=1)
 
     # 3D 커서: View 탭의 3D Cursor 위치/회전을 Transform과 같은 축약 그리드로 표시
-        layout.label(text="3D Cursor :", icon="PIVOT_CURSOR")
+        # 체크박스는 현재 3D 뷰 Overlays의 3D Cursor 표시를 켜고 끈다. 꺼져 있으면 값 필드를 흐리게 보여 준다.
+        overlay = getattr(context.space_data, "overlay", None)
+        row = layout.row(align=True)
+        if overlay is not None:
+            row.prop(overlay, "show_cursor", text="")
+        row.label(text="3D Cursor :", icon="PIVOT_CURSOR")
         cursor = context.scene.cursor
         column = layout.column(align=True)
+        column.active = overlay is None or overlay.show_cursor
         for full_label, short_label, property_name in cursor_rows(cursor):
             row = column.row(align=True)
             label_column = row.column(align=True)
@@ -584,12 +590,78 @@ class Add_Cylinder_12(Operator):
 
 # 원형 배열 오브젝트
 class CircleArray(Operator):
+    """활성 오브젝트를 원점 둘레에 링크 복제로 원형 배치합니다. 복제본이 원 중앙을 바라보게 하거나 회전값을 줄 수 있습니다."""
     bl_label = "Circle Array"
     bl_idname = "object.circle_array"
     bl_options = {'REGISTER', 'UNDO'}
 
     segment : IntProperty(name="Segment", default=6, min=3) # type: ignore
     radius : IntProperty(name="Radius", default=2, min=1) # type: ignore
+    # 복제본의 방향 기준: 원본 회전 유지 / 원 중앙 바라보기 / 바깥 바라보기
+    orientation : EnumProperty(
+        name="Facing",
+        items=[
+            ('NONE', "None", "원본 오브젝트의 회전을 그대로 유지"),
+            ('CENTER', "Center", "각 복제본의 Front 축이 원 중앙을 바라보도록 회전"),
+            ('OUTWARD', "Outward", "각 복제본의 Front 축이 원 바깥을 바라보도록 회전"),
+        ],
+        default='NONE',
+    ) # type: ignore
+    # 중앙(또는 바깥)을 향하게 할 오브젝트의 로컬 축. Blender 정면 뷰가 보는 면이 -Y이므로 기본값은 -Y.
+    front_axis : EnumProperty(
+        name="Front Axis",
+        items=[
+            ('NEG_Y', "-Y", "로컬 -Y 축을 정면으로 사용"),
+            ('Y', "Y", "로컬 +Y 축을 정면으로 사용"),
+            ('NEG_X', "-X", "로컬 -X 축을 정면으로 사용"),
+            ('X', "X", "로컬 +X 축을 정면으로 사용"),
+        ],
+        default='NEG_Y',
+    ) # type: ignore
+    # 방향을 맞춘 뒤 각 복제본의 로컬 축 기준으로 더하는 회전값
+    rotation : FloatVectorProperty(
+        name="Rotation",
+        description="각 복제본에 로컬 축 기준으로 추가하는 회전값",
+        size=3, subtype='EULER', unit='ROTATION',
+        default=(0.0, 0.0, 0.0),
+    ) # type: ignore
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and context.active_object is not None
+
+    # 3D View 좌하단 Adjust Last Operation 패널: Front Axis는 방향 맞추기를 켰을 때만 보여 준다.
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, "segment")
+        layout.prop(self, "radius")
+        layout.separator()
+        layout.prop(self, "orientation")
+        if self.orientation != 'NONE':
+            layout.prop(self, "front_axis")
+        layout.prop(self, "rotation")
+
+    def copy_rotation(self, base_rotation: Quaternion, position: Vector) -> Quaternion:
+        """
+        복제본 하나의 최종 회전을 계산한다.
+
+        Args:
+            base_rotation: 원본 오브젝트의 회전
+            position: 원 위에 놓인 복제본 위치 (원 중심은 원점)
+
+        Returns:
+            방향 맞추기와 추가 회전을 합친 회전
+        """
+        offset = Euler(self.rotation, 'XYZ').to_quaternion()
+        if self.orientation == 'NONE':
+            return base_rotation @ offset
+
+        # 중앙을 볼 때는 원점 쪽, 바깥을 볼 때는 반대쪽이 정면 방향이다.
+        direction = -position if self.orientation == 'CENTER' else position.copy()
+        track = self.front_axis.replace("NEG_", "-")
+        return direction.to_track_quat(track, 'Z') @ offset
 
     def execute(self, context):
 
@@ -598,8 +670,9 @@ class CircleArray(Operator):
         radius = self.radius
 
         # 선택한 오브젝트
-        origin_obj = bpy.context.active_object
+        origin_obj = context.active_object
         origin_obj.location = (0,0,0)
+        _location, base_rotation, scale = origin_obj.matrix_basis.decompose()
 
 
         for i in range(segment):
@@ -608,19 +681,21 @@ class CircleArray(Operator):
 
             x = radius * math.sin(current_angle_step)
             y = radius * math.cos(current_angle_step)
+            position = Vector((x, y, 0.0))
 
             # 선택한 오브젝트를 복제한 후 원래의 오브젝트에 데이터 링크
             copy_obj = origin_obj.copy()
             # copy_obj.data = origin_obj.data.copy()
-            copy_obj.location = (x, y, 0)
+            # 행렬로 지정해 Euler·Quaternion 등 회전 모드와 관계없이 같은 결과를 얻는다.
+            copy_obj.matrix_basis = Matrix.LocRotScale(position, self.copy_rotation(base_rotation, position), scale)
 
             # 메인 컬렉션에 복제된 오브젝트 링크
-            bpy.context.collection.objects.link(copy_obj)
+            context.collection.objects.link(copy_obj)
 
             # 데이터 링크
             copy_obj.select_set(True)
             origin_obj.select_set(True)
-            bpy.context.view_layer.objects.active = origin_obj
+            context.view_layer.objects.active = origin_obj
             bpy.ops.object.make_links_data(type='OBDATA')
             bpy.ops.object.select_all(action='DESELECT')
 
@@ -1307,54 +1382,115 @@ class PALETTE_OP_RGB(Operator):
 
 # 래티스 추가 --------------------------------------------------------------------
 
+# Lattice 모디파이어를 붙일 수 있는 오브젝트 종류
+LATTICE_TARGET_TYPES = {'MESH', 'CURVE', 'SURFACE', 'FONT'}
+
+
+def object_world_bounds(obj):
+    """
+    오브젝트의 실제 형상(모디파이어 적용 결과)을 감싸는 박스를 오브젝트 회전 기준으로 구한다.
+
+    Returns:
+        (월드 중심, 월드 회전, 월드 크기) 튜플. 오리진 위치와 관계없이 형상 자체의 중심을 쓴다.
+    """
+    corners = [Vector(corner) for corner in obj.bound_box]
+    local_min = Vector(tuple(min(corner[axis] for corner in corners) for axis in range(3)))
+    local_max = Vector(tuple(max(corner[axis] for corner in corners) for axis in range(3)))
+    _location, rotation, scale = obj.matrix_world.decompose()
+    center = obj.matrix_world @ ((local_min + local_max) * 0.5)
+    size = Vector(tuple(abs((local_max[axis] - local_min[axis]) * scale[axis]) for axis in range(3)))
+    return center, rotation, size
+
+
 class Add_Lattice(Operator):
-    """선택한 오브젝트를 기준으로 Lattice를 생성합니다."""
+    """선택한 오브젝트의 실제 형상을 감싸는 Lattice를 만들고 Lattice 모디파이어로 연결합니다. 오리진 위치와 관계없이 형상 중심에 맞춥니다."""
     bl_label = "Lattice"
     bl_idname = "wm.add_lattice"
     bl_options = {'REGISTER', 'UNDO'}
 
-    lattice_resolution: bpy.props.IntProperty(name="Resolution", default=0, min=0, max=10) # type: ignore
+    # Uniform: 세 축을 같은 수로 나눈다 / Per Axis: X·Y·Z를 각각 나눈다
+    resolution_mode: EnumProperty(
+        name="Divide",
+        items=[
+            ('UNIFORM', "Uniform", "X·Y·Z를 같은 수로 나눕니다"),
+            ('AXIS', "Per Axis", "X·Y·Z를 각각 다른 수로 나눕니다"),
+        ],
+        default='UNIFORM',
+    ) # type: ignore
+    # 해상도는 나누는 칸 사이에 추가하는 점 수다. 0이면 양 끝 점 2개만 둔다.
+    lattice_resolution: IntProperty(name="Resolution", default=0, min=0, max=10) # type: ignore
+    resolution_x: IntProperty(name="X", default=0, min=0, max=10) # type: ignore
+    resolution_y: IntProperty(name="Y", default=0, min=0, max=10) # type: ignore
+    resolution_z: IntProperty(name="Z", default=0, min=0, max=10) # type: ignore
+    # 형상에 딱 붙으면 경계의 점이 변형 범위 밖으로 빠질 수 있어 축마다 여유를 더한다.
+    margin: FloatProperty(
+        name="Margin",
+        description="형상 크기에 축마다 더하는 여유 (월드 단위)",
+        default=0.1, min=0.0, soft_max=1.0,
+        precision=3, subtype='DISTANCE', unit='LENGTH',
+    ) # type: ignore
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and any(obj.type in LATTICE_TARGET_TYPES for obj in context.selected_objects)
+
+    # 3D View 좌하단 Adjust Last Operation 패널: 나누는 방식에 맞는 해상도만 보여 준다.
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, "resolution_mode", expand=True)
+        if self.resolution_mode == 'UNIFORM':
+            layout.prop(self, "lattice_resolution")
+        else:
+            column = layout.column(align=True)
+            column.prop(self, "resolution_x")
+            column.prop(self, "resolution_y")
+            column.prop(self, "resolution_z")
+        layout.prop(self, "margin")
+
+    def axis_points(self):
+        """Lattice U·V·W(X·Y·Z) 방향 점 수를 돌려준다."""
+        if self.resolution_mode == 'UNIFORM':
+            resolutions = (self.lattice_resolution,) * 3
+        else:
+            resolutions = (self.resolution_x, self.resolution_y, self.resolution_z)
+        return tuple(2 + resolution for resolution in resolutions)
 
     def execute(self, context):
-        # 래티스 해상도 --------------------------
+        targets = [obj for obj in context.selected_objects if obj.type in LATTICE_TARGET_TYPES]
+        points_u, points_v, points_w = self.axis_points()
+        lattices = []
 
-        resolution = self.lattice_resolution
+        for obj in targets:
+            center, rotation, size = object_world_bounds(obj)
 
-        # ---------------------------------------------
+            # 래티스 데이터와 오브젝트 생성: 기본 래티스 점은 -0.5~0.5 범위라 스케일이 곧 크기다.
+            name = obj.name + "_Lattice"
+            lattice_data = bpy.data.lattices.new(name)
+            lattice_data.points_u = points_u
+            lattice_data.points_v = points_v
+            lattice_data.points_w = points_w
+            lattice_obj = bpy.data.objects.new(name, lattice_data)
+            lattice_obj.matrix_world = Matrix.LocRotScale(
+                center, rotation, tuple(size[axis] + self.margin for axis in range(3))
+            )
+            # 대상 오브젝트와 같은 컬렉션에 둔다.
+            collection = obj.users_collection[0] if obj.users_collection else context.collection
+            collection.objects.link(lattice_obj)
 
-        selObj = bpy.context.selected_objects
+            # "Lattice" 모디파이어를 추가하고 래티스 오브젝트 연결
+            modifier = obj.modifiers.new(name='Lattice', type='LATTICE')
+            modifier.object = lattice_obj
+            lattices.append(lattice_obj)
 
-        # 전체 선택 해제
-        bpy.ops.object.select_all(action='DESELECT')
-
-        for obj in selObj:
-
-            obj_loc = bpy.data.objects[obj.name].location
-
-        # 선택 오브젝트의 위치와 스케일을 기준으로 래티스 생성
-            bpy.ops.object.add(type='LATTICE', enter_editmode=False, align='WORLD', location=obj_loc, scale=(1, 1, 1))
-            curObj = bpy.context.selected_objects[0]
-            curObj.name = obj.name + "_Lattice"
-            latticeName = curObj.name
-            curObj.data.name = latticeName
-            size = obj.dimensions
-            curObj.scale = (size[0] + 0.1, size[1] + 0.1, size[2] + 0.1)
-
-        # 래티스 해상도
-            latticeObj = bpy.context.selected_objects[0]
-            latticeObj.data.points_u = 2 + resolution
-            latticeObj.data.points_v = 2 + resolution
-            latticeObj.data.points_w = 2 + resolution
-
-            bpy.ops.object.select_all(action='DESELECT')
-
-        # "Lattice" 모디파이어를 추가하고 "Lattice" 오브젝트 연결
-            obj.select_set(True)
-            selObj = bpy.context.selected_objects[0]
-            selObj.modifiers.new(name='Lattice', type='LATTICE')
-            selObj.modifiers["Lattice"].object = bpy.data.objects[latticeName]
-
-            bpy.ops.object.select_all(action='DESELECT')
+        # 바로 Tab으로 변형할 수 있도록 만든 래티스만 선택한다.
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        for lattice_obj in lattices:
+            lattice_obj.select_set(True)
+        if lattices:
+            context.view_layer.objects.active = lattices[-1]
 
         return {'FINISHED'}
 
@@ -1662,11 +1798,41 @@ def _activate_cat_tab_timer():
     return None
 
 
-EDIT_ELEMENT_TYPES = {
-    'VERT': bmesh.types.BMVert,
-    'EDGE': bmesh.types.BMEdge,
-    'FACE': bmesh.types.BMFace,
-}
+def sidebar_region_of(area):
+    return next((r for r in area.regions if r.type == 'UI'), None)
+
+
+def is_cat_tab_active(area) -> bool:
+    """area의 사이드바가 열려 있고 CatTools 탭이 보이는지 확인한다."""
+    space = area.spaces.active
+    region = sidebar_region_of(area)
+    if space is None or not space.show_region_ui or region is None:
+        return False
+    try:
+        return region.active_panel_category == CAT_CATEGORY
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def open_cat_sidebars() -> None:
+    """모든 3D 뷰의 사이드바를 열고 CatTools 탭을 활성화한다 (환경설정에서 켰을 때만)."""
+    preferences = cat_preferences(bpy.context)
+    if preferences is None or not preferences.open_sidebar_on_start:
+        activate_cat_tab_in_open_sidebars()
+        return
+    for window in bpy.context.window_manager.windows:
+        screen = window.screen
+        if screen is None:
+            continue
+        for area in screen.areas:
+            if area.type == 'VIEW_3D' and area.spaces.active is not None:
+                area.spaces.active.show_region_ui = True
+    activate_cat_tab_in_open_sidebars()
+
+
+def _open_cat_sidebars_timer():
+    open_cat_sidebars()
+    return None
 
 
 def edit_elements(bm, element_kind):
@@ -1967,8 +2133,17 @@ def world_normal(matrix: Matrix, normal: Vector) -> Vector:
     return result
 
 
+def unique_directions(directions, min_dot: float) -> list:
+    """방향 목록에서 서로 min_dot 이상 가까운 것은 하나만 남긴다 (첫 방향 우선)."""
+    unique = []
+    for direction in directions:
+        if all(direction.dot(existing) < min_dot for existing in unique):
+            unique.append(direction)
+    return unique
+
+
 class OBJECT_OT_CatSelectSameNormal(Operator):
-    """기준과 노멀 방향이 같은 면·선·점(Edit 모드) 또는 월드 회전이 같은 오브젝트(Object 모드)를 모두 선택합니다."""
+    """선택한 면·선·점(Edit 모드)의 노멀 또는 선택 오브젝트(Object 모드)의 월드 회전과 같은 방향인 대상을 모두 선택합니다. 여러 방향을 선택하면 각 방향마다 같은 대상을 고릅니다."""
     bl_idname = "object.cat_select_same_normal"
     bl_label = "Select Same Normal"
     bl_options = {'REGISTER', 'UNDO'}
@@ -2008,14 +2183,21 @@ class OBJECT_OT_CatSelectSameNormal(Operator):
         if context.mode == 'EDIT_MESH':
             return self.execute_edit_mesh(context)
         active_object = context.active_object
-        # 스케일을 제외한 월드 회전끼리 비교해 부모 회전까지 반영한다.
-        reference = active_object.matrix_world.to_quaternion()
+        # 선택된 모든 오브젝트의 월드 회전을 기준으로 삼는다. 스케일을 제외한 월드 회전끼리 비교해 부모 회전까지 반영한다.
+        sources = [active_object] + [obj for obj in context.selected_objects if obj is not active_object]
+        references = [obj.matrix_world.to_quaternion() for obj in sources]
+
+        def same_rotation(rotation) -> bool:
+            for reference in references:
+                difference = reference.rotation_difference(rotation).angle
+                # 쿼터니언 각도는 0~2π 범위라 반대쪽으로 가까운 경우도 같은 회전으로 본다.
+                if min(difference, 2 * math.pi - difference) <= self.angle:
+                    return True
+            return False
 
         count = 0
         for obj in context.selectable_objects:
-            difference = reference.rotation_difference(obj.matrix_world.to_quaternion()).angle
-            # 쿼터니언 각도는 0~2π 범위라 반대쪽으로 가까운 경우도 같은 회전으로 본다.
-            if min(difference, 2 * math.pi - difference) <= self.angle:
+            if same_rotation(obj.matrix_world.to_quaternion()):
                 obj.select_set(True)
                 count += 1
             elif not self.extend:
@@ -2038,25 +2220,26 @@ class OBJECT_OT_CatSelectSameNormal(Operator):
             bm = bmesh.from_edit_mesh(obj.data)
             meshes.append((obj, bm, [e for e in edit_elements(bm, element_kind) if not e.hide]))
 
-        reference = self.edit_reference(context, meshes, element_kind)
-        if reference is None:
+        # 각도 비교를 내적 비교로 바꿔 요소마다 acos를 계산하지 않는다.
+        min_dot = math.cos(self.angle) - 1e-6
+        references = self.edit_references(meshes, min_dot)
+        if not references:
             self.report({'WARNING'}, "노멀 방향의 기준이 될 점, 선, 면을 선택하세요.")
             return {'CANCELLED'}
 
-        # 각도 비교를 내적 비교로 바꿔 요소마다 acos를 계산하지 않는다.
-        min_dot = math.cos(self.angle)
         count = 0
         for obj, bm, elements in meshes:
             matrix = obj.matrix_world
-            matched = []
-            for e in elements:
-                normal = world_normal(matrix, edit_element_normal(e))
+            normals = {e: world_normal(matrix, edit_element_normal(e)) for e in elements}
+            matched = set()
+            for reference in references:
                 # 노멀이 없는(퇴화) 요소는 방향을 정할 수 없으므로 제외한다.
-                if normal.length > 1e-9 and normal.dot(reference) >= min_dot - 1e-6:
-                    matched.append(e)
-            if self.connected:
-                # 이미 선택된 같은 방향 요소(기준 포함)에서 출발해 맞닿은 같은 방향 요소로만 넓힌다.
-                matched = connected_elements([e for e in matched if e.select], set(matched))
+                same = {e for e, normal in normals.items() if normal.length > 1e-9 and normal.dot(reference) >= min_dot}
+                if self.connected:
+                    # 이 방향의 선택 요소에서 출발해 맞닿은 같은 방향 요소로만 넓힌다.
+                    # 방향마다 따로 넓혀야 서로 맞닿은 다른 방향 영역으로 번지지 않는다.
+                    same = connected_elements([e for e in same if e.select], same)
+                matched |= same
             if not self.extend:
                 for sequence in (bm.verts, bm.edges, bm.faces):
                     for element in sequence:
@@ -2072,26 +2255,15 @@ class OBJECT_OT_CatSelectSameNormal(Operator):
         return {'FINISHED'}
 
     @staticmethod
-    def edit_reference(context, meshes, element_kind):
-        # 활성 요소(마지막으로 클릭한 요소)의 노멀을 우선 기준으로 삼고, 없으면 선택 요소 노멀의 평균을 쓴다.
-        element_type = EDIT_ELEMENT_TYPES[element_kind]
-        for obj, bm, _elements in meshes:
-            if obj != context.edit_object:
-                continue
-            active = bm.select_history.active
-            if isinstance(active, element_type) and active.select:
-                normal = world_normal(obj.matrix_world, edit_element_normal(active))
-                if normal.length > 1e-9:
-                    return normal
-
-        total = Vector()
-        for obj, _bm, elements in meshes:
-            for e in elements:
-                if e.select:
-                    total += world_normal(obj.matrix_world, edit_element_normal(e))
-        if total.length <= 1e-9:
-            return None
-        return total.normalized()
+    def edit_references(meshes, min_dot: float) -> list:
+        """선택된 요소들의 서로 다른 월드 노멀 방향을 모두 기준으로 모은다."""
+        normals = (
+            world_normal(obj.matrix_world, edit_element_normal(e))
+            for obj, _bm, elements in meshes
+            for e in elements
+            if e.select
+        )
+        return unique_directions((normal for normal in normals if normal.length > 1e-9), min_dot)
 
 
 def fibonacci_sphere_directions(count: int):
@@ -2162,15 +2334,46 @@ def build_world_bvh(context, edit_meshes, include_others: bool):
     return BVHTree.FromPolygons(vertices, polygons), face_offsets
 
 
+# 정점 검사 지점을 면 안쪽으로 들이는 최대 거리(월드 단위). 광선 시작점을 노멀 방향으로 띄우는
+# 거리(1e-4)보다 커야, 같은 크기로 딱 맞게 덮인 면의 모서리에서 광선이 덮개 옆으로 새어 나가지 않는다.
+FACE_CORNER_INSET = 1e-3
+
+
+def face_corner_points(matrix, face):
+    """
+    면을 이루는 각 정점 위치의 월드 좌표 검사 지점을 만든다.
+
+    정점 바로 위는 이웃 면과의 경계라 판정이 흔들리므로, 정점에서 두 변 사이(면 안쪽)로
+    FACE_CORNER_INSET 만큼 들인 지점을 쓴다. 오목한 정점은 이등분 방향을 뒤집어 면 안쪽을 가리키게 한다.
+    """
+    for loop in face.loops:
+        corner = matrix @ loop.vert.co
+        previous = matrix @ loop.link_loop_prev.vert.co - corner
+        following = matrix @ loop.link_loop_next.vert.co - corner
+        if previous.length <= 1e-9 or following.length <= 1e-9:
+            yield corner
+            continue
+        bisector = previous.normalized() + following.normalized()
+        if bisector.length <= 1e-9:
+            yield corner
+            continue
+        if not loop.is_convex:
+            bisector.negate()
+        inset = min(FACE_CORNER_INSET, 0.25 * min(previous.length, following.length))
+        yield corner + bisector.normalized() * inset
+
+
 def face_sample_points(matrix, face, resolution: int):
     """
     면 위에 고르게 퍼진 월드 좌표 검사 지점을 만든다.
 
-    면 중심을 먼저 돌려주고, 이어서 면을 삼각형으로 나눠 각 삼각형을 resolution 격자로 쪼갠
-    작은 삼각형들의 무게중심을 돌려준다. 모든 지점이 면 안쪽에 있다.
+    면 중심과 각 정점 지점을 먼저 돌려주고, 이어서 면을 삼각형으로 나눠 각 삼각형을 resolution 격자로
+    쪼갠 작은 삼각형들의 무게중심을 돌려준다. 모든 지점이 면 안쪽에 있다.
+    정점 지점이 있어 가장자리만 얇게 드러난 면(작은 블록에 대부분 덮인 큰 면 등)도 보이는 면으로 잡는다.
     """
     coords = [matrix @ v.co for v in face.verts]
     yield matrix @ face.calc_center_median()
+    yield from face_corner_points(matrix, face)
     for a, b, c in tessellate_polygon([coords]):
         pa, pb, pc = coords[a], coords[b], coords[c]
         for i in range(resolution):
@@ -2275,6 +2478,7 @@ class OBJECT_OT_CatSelectHiddenFaces(Operator):
     @staticmethod
     def face_is_hidden(bvh, matrix, face, normal, directions, offset, resolution, polygon_index) -> bool:
         # 면 위에 고르게 깐 지점들에서 바깥쪽 반구로 쏜 광선이 하나라도 빠져나가면 보이는 면이다.
+        # 정점이 하나라도 드러나 있으면 보이는 면이므로, 모든 정점과 면 안쪽 지점이 가려져야 은면이다.
         # 일부만 드러난 길쭉한 면(지붕을 뚫고 나온 굴뚝 옆면 등)도 놓치지 않도록 면 전체를 표본으로 쓴다.
         outward = [d for d in directions if d.dot(normal) > 0.01]
         for point in face_sample_points(matrix, face, resolution):
@@ -2450,9 +2654,15 @@ class CatToolsPreferences(AddonPreferences):
         subtype='FILE_PATH',
         default=DEFAULT_PALETTE_PATH,
     )
+    open_sidebar_on_start: BoolProperty(
+        name="Open Sidebar on Start",
+        description="Blender를 시작하거나 파일을 열 때 3D 뷰 사이드바를 CatTools 탭으로 엽니다",
+        default=True,
+    )
 
     def draw(self, context):
         self.layout.prop(self, "palette_path")
+        self.layout.prop(self, "open_sidebar_on_start")
 
 
 def cat_preferences(context):
@@ -2929,11 +3139,17 @@ class VIEW3D_OT_CatSidebar(Operator):
     bl_idname = "view3d.cat_toggle_sidebar"
     bl_label = "Toggle Sidebar (CatTools)"
 
+    # 헤더 버튼용: 사이드바가 다른 탭으로 열려 있으면 닫지 않고 CatTools 탭으로 바꾼다.
+    switch_tab: BoolProperty(default=False, options={'SKIP_SAVE', 'HIDDEN'})  # type: ignore
+
     @classmethod
     def poll(cls, context):
         return context.space_data is not None and context.space_data.type == 'VIEW_3D'
 
     def execute(self, context) -> Set[str]:
+        if self.switch_tab and context.space_data.show_region_ui and not is_cat_tab_active(context.area):
+            activate_cat_tab_in_open_sidebars()
+            return {'FINISHED'}
         # show_region_ui 대입은 컨텍스트 오버라이드 아래에서 닫기 방향이 적용되지
         # 않으므로, 영역 컨텍스트를 그대로 쓰는 region_toggle로 토글한다.
         bpy.ops.screen.region_toggle(region_type='UI')
@@ -2942,10 +3158,24 @@ class VIEW3D_OT_CatSidebar(Operator):
         return {'FINISHED'}
 
 
+def draw_cat_header_button(self, context) -> None:
+    """3D 뷰 헤더 우측에 CatTools 사이드바를 여닫는 버튼을 그린다."""
+    if context.area is None:
+        return
+    operator = self.layout.operator(
+        VIEW3D_OT_CatSidebar.bl_idname,
+        text=CAT_CATEGORY,
+        icon='TOOL_SETTINGS',
+        depress=is_cat_tab_active(context.area),
+    )
+    operator.switch_tab = True
+
+
 @bpy.app.handlers.persistent
 def _on_load_post(_dummy) -> None:
-    # 사이드바가 이미 열린 상태로 저장된 파일에서도 CatTools가 먼저 보이게 한다.
-    activate_cat_tab_in_open_sidebars()
+    # 파일을 열 때마다 사이드바를 CatTools 탭으로 연다. 자동 열기를 끄면
+    # 이미 열린 상태로 저장된 사이드바만 CatTools 탭으로 맞춘다.
+    open_cat_sidebars()
 
 
 addon_keymaps = []
@@ -3013,14 +3243,21 @@ def register():
         if _reset_edit_transform_state not in handlers:
             handlers.append(_reset_edit_transform_state)
     register_keymaps()
+    bpy.types.VIEW3D_HT_header.append(draw_cat_header_button)
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
+    # 시작 시 창이 만들어진 뒤에 사이드바를 연다 (등록 시점에는 창이 없을 수 있다).
+    if not bpy.app.background and not bpy.app.timers.is_registered(_open_cat_sidebars_timer):
+        bpy.app.timers.register(_open_cat_sidebars_timer, first_interval=0.1)
 
 def unregister():
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
     if bpy.app.timers.is_registered(_activate_cat_tab_timer):
         bpy.app.timers.unregister(_activate_cat_tab_timer)
+    if bpy.app.timers.is_registered(_open_cat_sidebars_timer):
+        bpy.app.timers.unregister(_open_cat_sidebars_timer)
+    bpy.types.VIEW3D_HT_header.remove(draw_cat_header_button)
     unregister_keymaps()
     for handlers in EDIT_RESET_HANDLERS:
         if _reset_edit_transform_state in handlers:

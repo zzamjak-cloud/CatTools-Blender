@@ -29,6 +29,8 @@ SIDEBAR_SMOKE_PATH = ROOT / "tests" / "blender_sidebar_smoke.py"
 PALETTE_SMOKE_PATH = ROOT / "tests" / "blender_palette_smoke.py"
 MERGE_EDGES_SMOKE_PATH = ROOT / "tests" / "blender_merge_edges_smoke.py"
 APPLY_MODIFIERS_SMOKE_PATH = ROOT / "tests" / "blender_apply_modifiers_smoke.py"
+CIRCLE_ARRAY_SMOKE_PATH = ROOT / "tests" / "blender_circle_array_smoke.py"
+LATTICE_SMOKE_PATH = ROOT / "tests" / "blender_lattice_smoke.py"
 
 EXPECTED_REGISTERED_CLASSES = [
     "CatToolsPreferences",
@@ -137,7 +139,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], "1.0.0")
         self.assertEqual(manifest["id"], "cat_tools")
         self.assertEqual(manifest["name"], "CatTools")
-        self.assertEqual(manifest["version"], "1.13.0")
+        self.assertEqual(manifest["version"], "1.14.0")
         self.assertEqual(manifest["blender_version_min"], "4.2.0")
         self.assertIn("SPDX:GPL-3.0-or-later", manifest["license"])
 
@@ -150,7 +152,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         info = ast.literal_eval(info_node.value)
         self.assertEqual(info["name"], "CatTools")
-        self.assertEqual(info["version"], (1, 13, 0))
+        self.assertEqual(info["version"], (1, 14, 0))
         self.assertEqual(info["blender"], (4, 2, 0))
 
     def test_registered_class_order(self) -> None:
@@ -486,6 +488,49 @@ class CatToolsSmokeTest(unittest.TestCase):
         source = APPLY_MODIFIERS_SMOKE_PATH.read_text(encoding="utf-8")
         compile(source, str(APPLY_MODIFIERS_SMOKE_PATH), "exec")
         self.assertIn("bpy.ops.object.cat_apply_modifiers(", source)
+
+    def test_sidebar_quick_access_and_cursor_toggle(self) -> None:
+        self.assertIn("bpy.types.VIEW3D_HT_header.append(draw_cat_header_button)", self.source)
+        self.assertIn("bpy.types.VIEW3D_HT_header.remove(draw_cat_header_button)", self.source)
+        self.assertIn("open_sidebar_on_start: BoolProperty(", self.source)
+        self.assertIn("bpy.app.timers.unregister(_open_cat_sidebars_timer)", self.source)
+        panel = self.classes["OBJECT_PT_WoodyTool"]
+        draw = next(
+            node
+            for node in panel.body
+            if isinstance(node, ast.FunctionDef) and node.name == "draw"
+        )
+        self.assertIn("row.prop(overlay, 'show_cursor', text='')", ast.unparse(draw))
+
+    def test_lattice_fits_geometry_and_divides_per_axis(self) -> None:
+        operator = ast.unparse(self.classes["Add_Lattice"])
+        for name in ("resolution_mode", "lattice_resolution", "resolution_x", "resolution_y", "resolution_z", "margin"):
+            self.assertIn(f"{name}: ", operator)
+        self.assertIn("object_world_bounds(obj)", operator)
+        # 오리진 위치(obj.location)가 아니라 형상 바운딩 박스로 래티스를 맞춘다.
+        self.assertNotIn("obj.location", operator)
+        smoke = LATTICE_SMOKE_PATH.read_text(encoding="utf-8")
+        compile(smoke, str(LATTICE_SMOKE_PATH), "exec")
+        self.assertIn("bpy.ops.wm.add_lattice(", smoke)
+
+    def test_hidden_faces_checks_every_face_corner(self) -> None:
+        self.assertIn("yield from face_corner_points(matrix, face)", self.source)
+
+    def test_circle_array_exposes_facing_and_rotation_options(self) -> None:
+        operator = self.classes["CircleArray"]
+        source = ast.unparse(operator)
+        for name in ("orientation", "front_axis", "rotation"):
+            self.assertIn(f"{name}: ", source)
+        self.assertIn("'REGISTER', 'UNDO'", source)
+        draw = next(
+            node
+            for node in operator.body
+            if isinstance(node, ast.FunctionDef) and node.name == "draw"
+        )
+        self.assertIn("layout.prop(self, 'rotation')", ast.unparse(draw))
+        smoke = CIRCLE_ARRAY_SMOKE_PATH.read_text(encoding="utf-8")
+        compile(smoke, str(CIRCLE_ARRAY_SMOKE_PATH), "exec")
+        self.assertIn("bpy.ops.object.circle_array(", smoke)
 
     def test_palette_runtime_smoke_syntax(self) -> None:
         source = PALETTE_SMOKE_PATH.read_text(encoding="utf-8")

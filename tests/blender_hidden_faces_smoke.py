@@ -108,6 +108,20 @@ def check_other_objects_and_partial() -> None:
     remove_all_objects()
 
 
+def check_thin_exposed_margin() -> None:
+    # 2x2 블록 윗면 위에 1.9x1.9 블록을 올리면 윗면은 가장자리 0.05만 드러난다.
+    # 면 안쪽 격자점은 모두 가려지지만 정점이 드러나 있으므로 은면이 아니다.
+    obj = create_cubes_object("Margin", [((0.0, 0.0, 0.0), 2.0), ((0.0, 0.0, 1.95), 1.9)])
+    bm = enter_edit(obj)
+    assert bpy.ops.object.cat_select_hidden_faces() == {"FINISHED"}
+    centers = selected_centers(bm)
+    # 위 블록의 아랫면(z=1, 아래를 봄)만 은면이다.
+    assert len(centers) == 1 and abs(centers[0].z - 1.0) < 1e-6, centers
+    top = next(f for f in bm.faces if f.normal.z > 0.99 and abs(f.calc_center_median().z - 1.0) < 1e-6)
+    assert not top.select, "가장자리가 드러난 윗면은 선택되지 않아야 합니다."
+    remove_all_objects()
+
+
 def check_partially_buried_column() -> None:
     # 굴뚝처럼 몸체를 뚫고 올라와 위끝이 캡에 묻힌 기둥: 옆면 중심(z=0.45)과 양 끝 근처는 가려져도
     # 몸체 윗면(z=1)과 캡 아랫면(z=1.3) 사이 구간이 보이므로 옆면은 은면이 아니다.
@@ -183,6 +197,7 @@ def main() -> None:
         check_touching_blocks()
         check_enclosed_cube()
         check_other_objects_and_partial()
+        check_thin_exposed_margin()
         check_partially_buried_column()
         check_non_planar_quads()
         check_performance()
