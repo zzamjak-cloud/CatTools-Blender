@@ -139,7 +139,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], "1.0.0")
         self.assertEqual(manifest["id"], "cat_tools")
         self.assertEqual(manifest["name"], "CatTools")
-        self.assertEqual(manifest["version"], "1.14.1")
+        self.assertEqual(manifest["version"], "1.15.0")
         self.assertEqual(manifest["blender_version_min"], "4.2.0")
         self.assertIn("SPDX:GPL-3.0-or-later", manifest["license"])
 
@@ -152,7 +152,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         info = ast.literal_eval(info_node.value)
         self.assertEqual(info["name"], "CatTools")
-        self.assertEqual(info["version"], (1, 14, 1))
+        self.assertEqual(info["version"], (1, 15, 0))
         self.assertEqual(info["blender"], (4, 2, 0))
 
     def test_registered_class_order(self) -> None:
@@ -507,6 +507,11 @@ class CatToolsSmokeTest(unittest.TestCase):
         for name in ("resolution_mode", "lattice_resolution", "resolution_x", "resolution_y", "resolution_z", "margin"):
             self.assertIn(f"{name}: ", operator)
         self.assertIn("object_world_bounds(obj)", operator)
+        # 가이드: 단면마다 본 체인 + 래티스 Armature 모디파이어
+        for name in ("add_guides", "guide_axis"):
+            self.assertIn(f"{name}: ", operator)
+        self.assertIn("build_lattice_guides(context, lattice_obj, axis", operator)
+        self.assertIn("bone.inherit_scale = 'NONE'", self.source)
         # 오리진 위치(obj.location)가 아니라 형상 바운딩 박스로 래티스를 맞춘다.
         self.assertNotIn("obj.location", operator)
         smoke = LATTICE_SMOKE_PATH.read_text(encoding="utf-8")

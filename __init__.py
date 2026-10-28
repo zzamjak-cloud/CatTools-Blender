@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 14, 1),
+    "version": (1, 15, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -1402,8 +1402,119 @@ def object_world_bounds(obj):
     return center, rotation, size
 
 
+# 가이드 본 컨트롤러로 쓰는 사각 링 메쉬 (본 X·Z 평면, 한 변 1)
+LATTICE_GUIDE_WIDGET_NAME = "CatLatticeGuideWidget"
+# 단면 컨트롤러를 형상보다 살짝 크게 그려 메쉬에 묻히지 않게 한다.
+LATTICE_GUIDE_WIDGET_PADDING = 1.15
+
+
+def lattice_guide_widget():
+    """가이드 본의 커스텀 셰이프로 쓸 사각 링 오브젝트를 찾거나 만든다. 씬에는 링크하지 않는다."""
+    widget = bpy.data.objects.get(LATTICE_GUIDE_WIDGET_NAME)
+    if widget is not None and widget.type == 'MESH':
+        return widget
+    mesh = bpy.data.meshes.new(LATTICE_GUIDE_WIDGET_NAME)
+    corners = [(-0.5, 0.0, -0.5), (0.5, 0.0, -0.5), (0.5, 0.0, 0.5), (-0.5, 0.0, 0.5)]
+    mesh.from_pydata(corners, [(0, 1), (1, 2), (2, 3), (3, 0)], [])
+    return bpy.data.objects.new(LATTICE_GUIDE_WIDGET_NAME, mesh)
+
+
+def lattice_point_slice(index: int, points, axis: int) -> int:
+    """래티스 점 인덱스가 axis 방향으로 몇 번째 단면에 속하는지 돌려준다 (U가 가장 빠르게 바뀐다)."""
+    points_u, points_v, _points_w = points
+    coords = (index % points_u, (index // points_u) % points_v, index // (points_u * points_v))
+    return coords[axis]
+
+
+def build_lattice_guides(context, lattice_obj, axis: int, name: str):
+    """
+    래티스의 axis 방향 단면마다 가이드 본을 만들고, 단면의 래티스 점을 그 본에 묶는다.
+
+    본은 첫 단면부터 마지막 단면까지 부모-자식 체인(FK)을 이루며, 서로 붙이지(connect) 않아
+    회전뿐 아니라 개별 이동도 된다. 래티스에는 Armature 모디파이어를 달아 본 포즈로 변형한다.
+
+    Args:
+        context: 현재 컨텍스트
+        lattice_obj: 가이드를 붙일 래티스 오브젝트
+        axis: 단면을 나눌 래티스 축 (0=X/U, 1=Y/V, 2=Z/W)
+        name: 아마추어 오브젝트 이름
+
+    Returns:
+        만든 아마추어 오브젝트
+    """
+    data = lattice_obj.data
+    points = (data.points_u, data.points_v, data.points_w)
+    count = points[axis]
+    center, rotation, size = lattice_obj.matrix_world.decompose()
+    axes = [rotation @ Vector(direction) for direction in ((1, 0, 0), (0, 1, 0), (0, 0, 1))]
+    side_axes = [other for other in range(3) if other != axis]
+    direction = axes[axis]
+    length = size[axis]
+    spacing = length / (count - 1)
+
+    # 아마추어는 스케일 없이 래티스 위치·회전에 두어, 비균등 스케일 때문에 본 회전이 찌그러지지 않게 한다.
+    armature = bpy.data.armatures.new(name)
+    armature.display_type = 'OCTAHEDRAL'
+    armature_obj = bpy.data.objects.new(name, armature)
+    armature_obj.matrix_world = Matrix.LocRotScale(center, rotation, None)
+    armature_obj.show_in_front = True
+    collection = lattice_obj.users_collection[0] if lattice_obj.users_collection else context.collection
+    collection.objects.link(armature_obj)
+
+    # 본은 Edit 모드에서만 만들 수 있다.
+    for obj in context.selected_objects:
+        obj.select_set(False)
+    armature_obj.select_set(True)
+    context.view_layer.objects.active = armature_obj
+    bpy.ops.object.mode_set(mode='EDIT')
+    inverse = armature_obj.matrix_world.inverted()
+    bone_names = []
+    previous = None
+    for slice_index in range(count):
+        head = center + direction * (length * (slice_index / (count - 1) - 0.5))
+        bone = armature.edit_bones.new(f"Guide.{slice_index:03d}")
+        bone.head = inverse @ head
+        bone.tail = inverse @ (head + direction * spacing * 0.5)
+        # 본 Z를 래티스의 한 옆축에 맞춰 컨트롤러 링이 단면 방향과 일치하게 한다.
+        bone.align_roll(inverse.to_3x3() @ axes[side_axes[1]])
+        bone.parent = previous
+        bone.use_connect = False
+        # 이동·회전은 위 단면으로 이어지되(휘기), 스케일은 그 단면에만 적용한다(테이퍼).
+        bone.inherit_scale = 'NONE'
+        bone.use_deform = True
+        bone_names.append(bone.name)
+        previous = bone
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    # 단면 크기에 맞춘 사각 링 컨트롤러. 본 X·Z가 래티스의 두 옆축에 대응한다.
+    widget = lattice_guide_widget()
+    width_x = size[side_axes[0]] * LATTICE_GUIDE_WIDGET_PADDING
+    width_z = size[side_axes[1]] * LATTICE_GUIDE_WIDGET_PADDING
+    for bone_name in bone_names:
+        pose_bone = armature_obj.pose.bones[bone_name]
+        pose_bone.custom_shape = widget
+        pose_bone.use_custom_shape_bone_size = False
+        pose_bone.custom_shape_scale_xyz = (width_x, 1.0, width_z)
+        # 이동·회전·스케일을 모두 쓰므로 짐벌 락이 없는 쿼터니언 회전을 쓴다.
+        pose_bone.rotation_mode = 'QUATERNION'
+
+    # 단면마다 래티스 점을 해당 본 이름의 버텍스 그룹에 100% 가중치로 넣는다.
+    groups = [lattice_obj.vertex_groups.new(name=bone_name) for bone_name in bone_names]
+    members = [[] for _ in range(count)]
+    for index in range(len(data.points)):
+        members[lattice_point_slice(index, points, axis)].append(index)
+    for group, indices in zip(groups, members):
+        group.add(indices, 1.0, 'REPLACE')
+
+    modifier = lattice_obj.modifiers.new(name="Guides", type='ARMATURE')
+    modifier.object = armature_obj
+    modifier.use_vertex_groups = True
+    modifier.use_bone_envelopes = False
+    return armature_obj
+
+
 class Add_Lattice(Operator):
-    """선택한 오브젝트의 실제 형상을 감싸는 Lattice를 만들고 Lattice 모디파이어로 연결합니다. 오리진 위치와 관계없이 형상 중심에 맞춥니다."""
+    """선택한 오브젝트의 실제 형상을 감싸는 Lattice를 만들고 Lattice 모디파이어로 연결합니다. 오리진 위치와 관계없이 형상 중심에 맞추며, Guides를 켜면 단면마다 가이드 본을 함께 만듭니다."""
     bl_label = "Lattice"
     bl_idname = "wm.add_lattice"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1429,6 +1540,22 @@ class Add_Lattice(Operator):
         default=0.1, min=0.0, soft_max=1.0,
         precision=3, subtype='DISTANCE', unit='LENGTH',
     ) # type: ignore
+    # 해상도 단면마다 래티스 점을 붙잡는 가이드 본 체인을 함께 만든다.
+    add_guides: BoolProperty(
+        name="Guides",
+        description="해상도 단면마다 래티스 점을 붙잡는 가이드 본(Armature)을 만들어 정점 선택 없이 이동·회전·스케일로 변형합니다",
+        default=False,
+    ) # type: ignore
+    guide_axis: EnumProperty(
+        name="Guide Axis",
+        items=[
+            ('AUTO', "Auto", "형상이 가장 긴 축을 따라 단면을 나눕니다"),
+            ('X', "X", "X축을 따라 단면을 나눕니다"),
+            ('Y', "Y", "Y축을 따라 단면을 나눕니다"),
+            ('Z', "Z", "Z축을 따라 단면을 나눕니다"),
+        ],
+        default='AUTO',
+    ) # type: ignore
 
     @classmethod
     def poll(cls, context):
@@ -1448,6 +1575,11 @@ class Add_Lattice(Operator):
             column.prop(self, "resolution_y")
             column.prop(self, "resolution_z")
         layout.prop(self, "margin")
+        layout.separator()
+        layout.prop(self, "add_guides")
+        if self.add_guides:
+            row = layout.row()
+            row.prop(self, "guide_axis", expand=True)
 
     def axis_points(self):
         """Lattice U·V·W(X·Y·Z) 방향 점 수를 돌려준다."""
@@ -1461,6 +1593,7 @@ class Add_Lattice(Operator):
         targets = [obj for obj in context.selected_objects if obj.type in LATTICE_TARGET_TYPES]
         points_u, points_v, points_w = self.axis_points()
         lattices = []
+        guides = []
 
         for obj in targets:
             center, rotation, size = object_world_bounds(obj)
@@ -1468,10 +1601,12 @@ class Add_Lattice(Operator):
             # 래티스 데이터와 오브젝트 생성: 기본 래티스 점은 -0.5~0.5 범위라 스케일이 곧 크기다.
             name = obj.name + "_Lattice"
             lattice_data = bpy.data.lattices.new(name)
+            # 점 수는 오브젝트를 만든 뒤에 바꿔야 한다. 오브젝트가 없을 때 바꾸면 Blender가 점 간격을 1로 잡아
+            # 해상도만큼 래티스가 -0.5~0.5 범위를 벗어나 형상보다 커진다.
+            lattice_obj = bpy.data.objects.new(name, lattice_data)
             lattice_data.points_u = points_u
             lattice_data.points_v = points_v
             lattice_data.points_w = points_w
-            lattice_obj = bpy.data.objects.new(name, lattice_data)
             lattice_obj.matrix_world = Matrix.LocRotScale(
                 center, rotation, tuple(size[axis] + self.margin for axis in range(3))
             )
@@ -1484,13 +1619,21 @@ class Add_Lattice(Operator):
             modifier.object = lattice_obj
             lattices.append(lattice_obj)
 
-        # 바로 Tab으로 변형할 수 있도록 만든 래티스만 선택한다.
+            if self.add_guides:
+                if self.guide_axis == 'AUTO':
+                    axis = max(range(3), key=lambda index: size[index])
+                else:
+                    axis = 'XYZ'.index(self.guide_axis)
+                guides.append(build_lattice_guides(context, lattice_obj, axis, obj.name + "_LatticeGuide"))
+
+        # 바로 다룰 수 있도록 가이드가 있으면 가이드(Ctrl+Tab으로 Pose 모드)를, 없으면 래티스(Tab)를 선택한다.
+        handles = guides or lattices
         for obj in context.selected_objects:
             obj.select_set(False)
-        for lattice_obj in lattices:
-            lattice_obj.select_set(True)
-        if lattices:
-            context.view_layer.objects.active = lattices[-1]
+        for handle in handles:
+            handle.select_set(True)
+        if handles:
+            context.view_layer.objects.active = handles[-1]
 
         return {'FINISHED'}
 
