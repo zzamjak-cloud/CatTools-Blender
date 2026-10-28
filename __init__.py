@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 14, 0),
+    "version": (1, 14, 1),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -683,21 +683,21 @@ class CircleArray(Operator):
             y = radius * math.cos(current_angle_step)
             position = Vector((x, y, 0.0))
 
-            # 선택한 오브젝트를 복제한 후 원래의 오브젝트에 데이터 링크
+            # 오브젝트 copy()는 메쉬 데이터를 공유하는 링크 복제를 만든다.
+            # 복제본마다 bpy.ops(데이터 링크·전체 선택 해제)를 부르면 씬 전체를 매번 훑어
+            # Adjust Last Operation에서 값을 바꿀 때 크게 느려지므로 데이터 API만 쓴다.
             copy_obj = origin_obj.copy()
-            # copy_obj.data = origin_obj.data.copy()
             # 행렬로 지정해 Euler·Quaternion 등 회전 모드와 관계없이 같은 결과를 얻는다.
             copy_obj.matrix_basis = Matrix.LocRotScale(position, self.copy_rotation(base_rotation, position), scale)
 
             # 메인 컬렉션에 복제된 오브젝트 링크
             context.collection.objects.link(copy_obj)
+            copy_obj.select_set(False)
 
-            # 데이터 링크
-            copy_obj.select_set(True)
-            origin_obj.select_set(True)
-            context.view_layer.objects.active = origin_obj
-            bpy.ops.object.make_links_data(type='OBDATA')
-            bpy.ops.object.select_all(action='DESELECT')
+        # 기존 동작과 같이 원본을 활성 오브젝트로 두고 선택은 모두 해제한다.
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        context.view_layer.objects.active = origin_obj
 
         return {'FINISHED'}
 
