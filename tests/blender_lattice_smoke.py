@@ -169,10 +169,12 @@ def main() -> None:
         obj = create_offset_box("LatticeTarget")
         before = [obj.matrix_world @ v.co for v in obj.data.vertices]
 
-        assert bpy.ops.wm.add_lattice() == {"FINISHED"}
+        assert bpy.ops.wm.add_lattice(add_guides=False) == {"FINISHED"}
         lattice = bpy.data.objects["LatticeTarget_Lattice"]
         assert obj.modifiers["Lattice"].object is lattice, "Lattice 모디파이어가 연결되지 않았습니다."
         assert bpy.context.view_layer.objects.active is lattice, "만든 래티스가 활성화되지 않았습니다."
+        # 실행 후 상태(래티스만 선택)에서도 poll이 통과해야 Adjust Last Operation 패널이 뜬다.
+        assert bpy.ops.wm.add_lattice.poll(), "실행 후 poll이 실패해 Adjust Last Operation 패널이 숨겨집니다."
 
         # 래티스 중심은 오리진이 아니라 형상 중심이고, 크기는 실제 형상 크기 + Margin이다.
         geometry_center = sum(before, Vector()) / len(before)
@@ -225,13 +227,20 @@ def main() -> None:
         assert "LatticeEmpty_Lattice" not in bpy.data.objects
         remove_all_objects()
 
-        # 메쉬가 없으면 버튼이 비활성화된다.
+        # 메쉬가 없으면 아무것도 만들지 않고 취소된다.
         empty = bpy.data.objects.new("OnlyEmpty", None)
         bpy.context.collection.objects.link(empty)
         bpy.ops.object.select_all(action="DESELECT")
         empty.select_set(True)
         bpy.context.view_layer.objects.active = empty
-        assert not bpy.ops.wm.add_lattice.poll(), "Empty만 선택했는데 Lattice가 활성화되었습니다."
+        assert bpy.ops.wm.add_lattice() == {"CANCELLED"}, "Empty만 선택했는데 Lattice가 실행되었습니다."
+        assert "OnlyEmpty_Lattice" not in bpy.data.objects
+
+        # 기본값으로 실행하면 가이드가 함께 만들어지고, 가이드가 선택된 상태에서도 poll이 통과한다.
+        create_tall_box("GuideDefault")
+        assert bpy.ops.wm.add_lattice() == {"FINISHED"}
+        assert "GuideDefault_LatticeGuide" in bpy.data.objects, "Guides 기본값이 꺼져 있습니다."
+        assert bpy.ops.wm.add_lattice.poll(), "가이드 생성 후 poll이 실패해 Adjust Last Operation 패널이 숨겨집니다."
 
         remove_all_objects()
         check_guides()

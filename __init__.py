@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 15, 0),
+    "version": (1, 15, 1),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -1544,7 +1544,7 @@ class Add_Lattice(Operator):
     add_guides: BoolProperty(
         name="Guides",
         description="해상도 단면마다 래티스 점을 붙잡는 가이드 본(Armature)을 만들어 정점 선택 없이 이동·회전·스케일로 변형합니다",
-        default=False,
+        default=True,
     ) # type: ignore
     guide_axis: EnumProperty(
         name="Guide Axis",
@@ -1557,9 +1557,11 @@ class Add_Lattice(Operator):
         default='AUTO',
     ) # type: ignore
 
+    # Adjust Last Operation 패널은 실행이 끝난 뒤의 상태로 poll을 다시 검사한다. 실행 후에는 만든
+    # 래티스·가이드만 선택되므로 선택 대상까지 poll에서 검사하면 패널이 뜨지 않는다. 대상 검사는 execute에서 한다.
     @classmethod
     def poll(cls, context):
-        return context.mode == 'OBJECT' and any(obj.type in LATTICE_TARGET_TYPES for obj in context.selected_objects)
+        return context.mode == 'OBJECT'
 
     # 3D View 좌하단 Adjust Last Operation 패널: 나누는 방식에 맞는 해상도만 보여 준다.
     def draw(self, context):
@@ -1591,6 +1593,9 @@ class Add_Lattice(Operator):
 
     def execute(self, context):
         targets = [obj for obj in context.selected_objects if obj.type in LATTICE_TARGET_TYPES]
+        if not targets:
+            self.report({'WARNING'}, "Lattice를 적용할 메쉬·커브 오브젝트를 선택하세요.")
+            return {'CANCELLED'}
         points_u, points_v, points_w = self.axis_points()
         lattices = []
         guides = []

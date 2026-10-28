@@ -139,7 +139,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], "1.0.0")
         self.assertEqual(manifest["id"], "cat_tools")
         self.assertEqual(manifest["name"], "CatTools")
-        self.assertEqual(manifest["version"], "1.15.0")
+        self.assertEqual(manifest["version"], "1.15.1")
         self.assertEqual(manifest["blender_version_min"], "4.2.0")
         self.assertIn("SPDX:GPL-3.0-or-later", manifest["license"])
 
@@ -152,7 +152,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         info = ast.literal_eval(info_node.value)
         self.assertEqual(info["name"], "CatTools")
-        self.assertEqual(info["version"], (1, 15, 0))
+        self.assertEqual(info["version"], (1, 15, 1))
         self.assertEqual(info["blender"], (4, 2, 0))
 
     def test_registered_class_order(self) -> None:
@@ -512,6 +512,13 @@ class CatToolsSmokeTest(unittest.TestCase):
             self.assertIn(f"{name}: ", operator)
         self.assertIn("build_lattice_guides(context, lattice_obj, axis", operator)
         self.assertIn("bone.inherit_scale = 'NONE'", self.source)
+        # 실행 후 선택이 바뀌어도 Adjust Last Operation 패널이 뜨도록 poll은 모드만 검사한다.
+        poll = next(
+            node
+            for node in self.classes["Add_Lattice"].body
+            if isinstance(node, ast.FunctionDef) and node.name == "poll"
+        )
+        self.assertEqual(ast.unparse(poll.body[-1]), "return context.mode == 'OBJECT'")
         # 오리진 위치(obj.location)가 아니라 형상 바운딩 박스로 래티스를 맞춘다.
         self.assertNotIn("obj.location", operator)
         smoke = LATTICE_SMOKE_PATH.read_text(encoding="utf-8")
