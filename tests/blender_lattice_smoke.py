@@ -126,6 +126,30 @@ def check_handles(addon) -> None:
     bpy.ops.transform.translate(value=(0.0, 0.0, 0.4), constraint_axis=(False, False, True))
     moved = [i for i, p in enumerate(points) if (p.co_deform - before[i]).length > 1e-6]
     assert moved == [0], moved
+
+    # 단면을 선택하면 다른 축 단면 핸들은 숨기고, 선택이 풀리면 다시 보인다.
+    assert addon.lattice_hidden_slice_axes(lattice) == set()
+    assert bpy.ops.lattice.cat_select_handle(kind="SLICE", axis=2, index=1) == {"FINISHED"}
+    assert addon.lattice_hidden_slice_axes(lattice) == {0, 1}
+    for point in points:
+        point.select = False
+    assert addon.lattice_hidden_slice_axes(lattice) == set()
+
+    # 단면을 돌리거나 키우면 단면 핸들도 단면 중심 기준으로 같이 돌고 같이 멀어진다.
+    def handle_offset():
+        indices = addon.lattice_slice_indices(lattice, 2, 3)
+        center = sum((lattice.matrix_world @ points[i].co_deform for i in indices), Vector()) / len(indices)
+        return addon.lattice_slice_handle_position(lattice, 2, 3) - center
+
+    assert bpy.ops.lattice.cat_select_handle(kind="SLICE", axis=2, index=3) == {"FINISHED"}
+    before = handle_offset()
+    bpy.ops.transform.rotate(value=math.radians(90.0), orient_axis="Z")
+    rotated = handle_offset()
+    assert abs(before.angle(rotated) - math.radians(90.0)) < 1e-3, "단면 핸들이 단면 회전을 따라가지 않습니다."
+    assert abs(rotated.length - before.length) < 1e-4
+    bpy.ops.transform.resize(value=(2.0, 2.0, 1.0))
+    scaled = handle_offset()
+    assert abs(scaled.length / rotated.length - 2.0) < 1e-3, "단면 핸들이 단면 스케일을 따라가지 않습니다."
     bpy.ops.object.mode_set(mode="OBJECT")
     remove_all_objects()
 

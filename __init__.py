@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 17, 0),
+    "version": (1, 17, 1),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -1411,6 +1411,17 @@ LATTICE_AXIS_COLORS = ((0.95, 0.3, 0.35), (0.45, 0.85, 0.2), (0.3, 0.55, 1.0))
 # 점 핸들 기본 색과 선택된 핸들 색 (Blender 선택색 계열)
 LATTICE_POINT_COLOR = (0.9, 0.9, 0.9)
 LATTICE_SELECTED_COLOR = (1.0, 0.55, 0.1)
+# 핸들 표시 스타일: (앞쪽 값, 뒤쪽 값). 화면 깊이에 따라 둘 사이를 보간한다.
+# 선택하지 않은 점 핸들은 형상을 가리지 않도록 작고 흐리게, 선택한 핸들만 크고 불투명하게 그린다.
+LATTICE_POINT_ALPHA = (0.35, 0.08)
+LATTICE_POINT_SIZE = (0.045, 0.03)
+LATTICE_SLICE_ALPHA = (0.75, 0.2)
+LATTICE_SLICE_SIZE = (0.11, 0.075)
+LATTICE_SELECTED_ALPHA = (1.0, 0.55)
+LATTICE_SELECTED_POINT_SIZE = (0.075, 0.06)
+LATTICE_SELECTED_SLICE_SIZE = (0.14, 0.11)
+# 래티스 깊이 범위에서 이 비율보다 뒤에 있는 핸들은 채우지 않고 속이 빈 링으로 그린다.
+LATTICE_BACK_THRESHOLD = 0.5
 
 
 def lattice_point_coords(index: int, points):
@@ -1431,19 +1442,46 @@ def lattice_slice_indices(lattice_obj, axis: int, slice_index: int):
 
 def lattice_slice_handle_position(lattice_obj, axis: int, slice_index: int) -> Vector:
     """
-    단면 핸들의 월드 위치: 단면 점들의 평균 위치에서 래티스 바깥 레일로 뺀 곳.
+    단면 핸들의 월드 위치: 단면 중심에서 단면의 한쪽 모서리 줄 중점 방향으로, 그 모서리보다 조금 더 바깥.
 
-    점 핸들과 겹치지 않도록 (axis+1) 축의 음(-) 방향으로 래티스 반폭보다 조금 더 바깥에 둔다.
+    단면 자신의 현재 점 위치로 계산하므로 단면을 돌리면 핸들도 같이 돌고, 키우거나 줄이면 같이 멀어지거나
+    가까워진다. 모서리 줄은 (axis+1) 축 격자 좌표가 0인 점들이며, 점 핸들과 겹치지 않게 모서리 밖에 둔다.
     """
+    data = lattice_obj.data
+    points = data.points
+    counts = (data.points_u, data.points_v, data.points_w)
     matrix = lattice_obj.matrix_world
-    points = lattice_obj.data.points
     indices = lattice_slice_indices(lattice_obj, axis, slice_index)
-    center = sum((matrix @ points[index].co_deform for index in indices), Vector()) / len(indices)
     side = (axis + 1) % 3
-    half = matrix.to_scale()[side] * 0.5
-    direction = Vector((0.0, 0.0, 0.0))
-    direction[side] = -1.0
-    return center + matrix.to_quaternion() @ direction * half * (1.0 + LATTICE_RAIL_OFFSET)
+    edge = [index for index in indices if lattice_point_coords(index, counts)[side] == 0]
+    center = sum((matrix @ points[index].co_deform for index in indices), Vector()) / len(indices)
+    edge_center = sum((matrix @ points[index].co_deform for index in edge), Vector()) / len(edge)
+    offset = edge_center - center
+    if offset.length < 1e-6:
+        # 단면이 한 점으로 모이면 래티스 축 방향을 대신 쓴다.
+        direction = Vector((0.0, 0.0, 0.0))
+        direction[side] = -1.0
+        offset = matrix.to_quaternion() @ direction * matrix.to_scale()[side] * 0.5
+    return center + offset * (1.0 + LATTICE_RAIL_OFFSET)
+
+
+def lattice_slice_selected(lattice_obj, axis: int, slice_index: int) -> bool:
+    """단면의 모든 점이 선택돼 있는지 확인한다."""
+    points = lattice_obj.data.points
+    return all(points[index].select for index in lattice_slice_indices(lattice_obj, axis, slice_index))
+
+
+def lattice_hidden_slice_axes(lattice_obj) -> set:
+    """
+    숨길 단면 핸들 축. 단면이 통째로 선택된 축이 있으면 나머지 축을 숨기고, 없으면 아무 축도 숨기지 않는다.
+    """
+    data = lattice_obj.data
+    counts = (data.points_u, data.points_v, data.points_w)
+    active = {
+        axis for axis in range(3)
+        if any(lattice_slice_selected(lattice_obj, axis, slice_index) for slice_index in range(counts[axis]))
+    }
+    return {0, 1, 2} - active if active else set()
 
 
 class LATTICE_OT_CatSelectHandle(Operator):
@@ -1545,7 +1583,7 @@ class VIEW3D_GGT_CatLatticeHandles(GizmoGroup):
             self.gizmos.remove(gizmo)
         data = lattice_obj.data
         points = (data.points_u, data.points_v, data.points_w)
-        # 점 핸들: 래티스 점마다 작은 흰 원
+        # 점 핸들: 래티스 점마다 작은 흰 원 (크기·투명도는 draw_prepare에서 깊이와 선택에 맞춘다)
         self.point_gizmos = [
             (self.new_handle(LATTICE_POINT_COLOR, 0.07, 'POINT', index), index)
             for index in range(len(data.points))
@@ -1565,18 +1603,63 @@ class VIEW3D_GGT_CatLatticeHandles(GizmoGroup):
         if key != self.layout_key:
             self.rebuild(lattice_obj)
 
+    @staticmethod
+    def style_handle(gizmo, depth: float, color, alpha_range, size_range) -> None:
+        """
+        깊이(0=래티스 맨 앞, 1=맨 뒤)에 맞춰 핸들의 색·투명도·크기·채움을 정한다.
+
+        뒤쪽일수록 작고 흐려지며, 절반보다 뒤에 있으면 속이 빈 링으로 그려 앞쪽 핸들과 구분한다.
+        """
+        gizmo.color = color
+        gizmo.alpha = alpha_range[0] + (alpha_range[1] - alpha_range[0]) * depth
+        gizmo.scale_basis = size_range[0] + (size_range[1] - size_range[0]) * depth
+        gizmo.draw_options = {'ALIGN_VIEW'} if depth > LATTICE_BACK_THRESHOLD else {'FILL', 'ALIGN_VIEW'}
+
     def draw_prepare(self, context):
-        # 점이 움직이거나 래티스를 옮겨도 핸들이 따라가도록 위치와 선택 색을 매번 맞춘다.
+        # 점이 움직이거나 래티스를 옮겨도 핸들이 따라가도록 위치·선택 표시·앞뒤 표현을 매번 맞춘다.
         lattice_obj = context.active_object
         matrix = lattice_obj.matrix_world
         points = lattice_obj.data.points
+        positions = [matrix @ point.co_deform for point in points]
+        slice_positions = [
+            lattice_slice_handle_position(lattice_obj, axis, slice_index)
+            for _gizmo, axis, slice_index in self.slice_gizmos
+        ]
+
+        # 화면 깊이: 뷰 공간 Z가 클수록 카메라에 가깝다. 래티스 점들의 깊이 범위로 0(앞)~1(뒤)로 정규화한다.
+        region_data = context.region_data
+        view_matrix = region_data.view_matrix if region_data is not None else Matrix.Identity(4)
+        depths = [(view_matrix @ position).z for position in positions]
+        nearest, farthest = max(depths), min(depths)
+        span = max(nearest - farthest, 1e-6)
+
+        def depth_of(position) -> float:
+            return min(max((nearest - (view_matrix @ position).z) / span, 0.0), 1.0)
+
         for gizmo, index in self.point_gizmos:
-            gizmo.matrix_basis = Matrix.Translation(matrix @ points[index].co_deform)
-            gizmo.color = LATTICE_SELECTED_COLOR if points[index].select else LATTICE_POINT_COLOR
+            gizmo.matrix_basis = Matrix.Translation(positions[index])
+            if points[index].select:
+                self.style_handle(gizmo, depth_of(positions[index]), LATTICE_SELECTED_COLOR,
+                                  LATTICE_SELECTED_ALPHA, LATTICE_SELECTED_POINT_SIZE)
+            else:
+                self.style_handle(gizmo, depth_of(positions[index]), LATTICE_POINT_COLOR,
+                                  LATTICE_POINT_ALPHA, LATTICE_POINT_SIZE)
+        # 단면이 선택된 축이 있으면 그 축의 단면 핸들만 남기고 다른 축 핸들은 숨긴다.
+        # 선택이 모두 풀리면 세 축 핸들이 다시 보인다.
+        hidden_axes = lattice_hidden_slice_axes(lattice_obj)
         for gizmo, axis, slice_index in self.slice_gizmos:
-            gizmo.matrix_basis = Matrix.Translation(lattice_slice_handle_position(lattice_obj, axis, slice_index))
-            selected = all(points[index].select for index in lattice_slice_indices(lattice_obj, axis, slice_index))
-            gizmo.color = LATTICE_SELECTED_COLOR if selected else LATTICE_AXIS_COLORS[axis]
+            gizmo.hide = axis in hidden_axes
+        slice_selected = [
+            lattice_slice_selected(lattice_obj, axis, slice_index) for _gizmo, axis, slice_index in self.slice_gizmos
+        ]
+        for (gizmo, axis, slice_index), position, selected in zip(self.slice_gizmos, slice_positions, slice_selected):
+            gizmo.matrix_basis = Matrix.Translation(position)
+            if selected:
+                self.style_handle(gizmo, depth_of(position), LATTICE_SELECTED_COLOR,
+                                  LATTICE_SELECTED_ALPHA, LATTICE_SELECTED_SLICE_SIZE)
+            else:
+                self.style_handle(gizmo, depth_of(position), LATTICE_AXIS_COLORS[axis],
+                                  LATTICE_SLICE_ALPHA, LATTICE_SLICE_SIZE)
 
 
 class Add_Lattice(Operator):
