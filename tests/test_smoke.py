@@ -50,6 +50,7 @@ EXPECTED_REGISTERED_CLASSES = [
     "SHADER_OP_TwoSideTex",
     "SHADER_OP_Catoon",
     "Add_Lattice",
+    "LATTICE_OT_CatSelectHandle",
     "VIEW3D_GGT_CatLatticeHandles",
     "Add_Mirror_X_Modifier",
     "Add_Mirror_Y_Modifier",
@@ -140,7 +141,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], "1.0.0")
         self.assertEqual(manifest["id"], "cat_tools")
         self.assertEqual(manifest["name"], "CatTools")
-        self.assertEqual(manifest["version"], "1.16.0")
+        self.assertEqual(manifest["version"], "1.17.0")
         self.assertEqual(manifest["blender_version_min"], "4.2.0")
         self.assertIn("SPDX:GPL-3.0-or-later", manifest["license"])
 
@@ -153,7 +154,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         info = ast.literal_eval(info_node.value)
         self.assertEqual(info["name"], "CatTools")
-        self.assertEqual(info["version"], (1, 16, 0))
+        self.assertEqual(info["version"], (1, 17, 0))
         self.assertEqual(info["blender"], (4, 2, 0))
 
     def test_registered_class_order(self) -> None:
@@ -512,8 +513,10 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertIn("handles: ", operator)
         self.assertIn("lattice_obj[LATTICE_GIZMO_PROP] = self.handles", operator)
         gizmo_group = ast.unparse(self.classes["VIEW3D_GGT_CatLatticeHandles"])
-        self.assertIn("for axis in range(3):", gizmo_group)
-        self.assertIn('bpy.ops.ed.undo_push(message="Lattice Handle")', self.source)
+        # 점 핸들과 X·Y·Z 세 축 단면 핸들을 모두 만든다.
+        self.assertIn("for axis in range(3)", gizmo_group)
+        # 핸들은 클릭하면 선택 연산자를 부르고, 변형은 Blender 기본 G·R·S(축 고정)에 맡긴다.
+        self.assertIn("gizmo.target_set_operator(LATTICE_OT_CatSelectHandle.bl_idname)", gizmo_group)
         self.assertNotIn("build_lattice_guides", self.source)
         # 실행 후 선택이 바뀌어도 Adjust Last Operation 패널이 뜨도록 poll은 모드만 검사한다.
         poll = next(

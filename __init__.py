@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 16, 0),
+    "version": (1, 17, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -1402,26 +1402,21 @@ def object_world_bounds(obj):
     return center, rotation, size
 
 
-# 이 커스텀 속성이 켜진 래티스를 선택하면 3D 뷰에 점·단면 기즈모 핸들을 띄운다.
+# 이 커스텀 속성이 켜진 래티스를 선택하면 3D 뷰에 점·단면 선택 핸들을 띄운다.
 LATTICE_GIZMO_PROP = "cat_lattice_gizmo"
 # 단면 핸들을 래티스 바깥 레일에 둘 때 래티스 경계에서 띄우는 거리 (래티스 반폭 대비 비율)
 LATTICE_RAIL_OFFSET = 0.35
 # 단면 핸들 색: X·Y·Z 축 색 (Blender 축 색과 같은 계열)
 LATTICE_AXIS_COLORS = ((0.95, 0.3, 0.35), (0.45, 0.85, 0.2), (0.3, 0.55, 1.0))
+# 점 핸들 기본 색과 선택된 핸들 색 (Blender 선택색 계열)
+LATTICE_POINT_COLOR = (0.9, 0.9, 0.9)
+LATTICE_SELECTED_COLOR = (1.0, 0.55, 0.1)
 
 
 def lattice_point_coords(index: int, points):
     """래티스 점 인덱스를 (U, V, W) 격자 좌표로 바꾼다 (U가 가장 빠르게 바뀐다)."""
     points_u, points_v, _points_w = points
     return (index % points_u, (index // points_u) % points_v, index // (points_u * points_v))
-
-
-def lattice_frame(lattice_obj):
-    """래티스 월드 행렬, 스케일을 뺀 위치·회전 프레임, 그 역행렬을 돌려준다."""
-    matrix = lattice_obj.matrix_world
-    location, rotation, _scale = matrix.decompose()
-    frame = Matrix.LocRotScale(location, rotation, None)
-    return matrix, frame, frame.inverted()
 
 
 def lattice_slice_indices(lattice_obj, axis: int, slice_index: int):
@@ -1434,73 +1429,79 @@ def lattice_slice_indices(lattice_obj, axis: int, slice_index: int):
     ]
 
 
-def lattice_rail_offset(lattice_obj, axis: int) -> Vector:
-    """axis 단면 핸들을 점 핸들과 겹치지 않게 래티스 바깥으로 빼는 프레임 좌표 오프셋."""
-    side = (axis + 1) % 3
-    half = lattice_obj.matrix_world.to_scale()[side] * 0.5
-    offset = Vector((0.0, 0.0, 0.0))
-    offset[side] = -half * (1.0 + LATTICE_RAIL_OFFSET)
-    return offset
+def lattice_slice_handle_position(lattice_obj, axis: int, slice_index: int) -> Vector:
+    """
+    단면 핸들의 월드 위치: 단면 점들의 평균 위치에서 래티스 바깥 레일로 뺀 곳.
 
-
-def lattice_point_handle_get(name: str, index: int):
-    """점 핸들 값: 래티스 점의 현재(변형된) 위치를 스케일 없는 래티스 프레임 좌표로 돌려준다."""
-    lattice_obj = bpy.data.objects.get(name)
-    if lattice_obj is None or index >= len(lattice_obj.data.points):
-        return (0.0, 0.0, 0.0)
-    matrix, _frame, frame_inverse = lattice_frame(lattice_obj)
-    return tuple(frame_inverse @ (matrix @ lattice_obj.data.points[index].co_deform))
-
-
-def lattice_point_handle_set(name: str, index: int, value) -> None:
-    lattice_obj = bpy.data.objects.get(name)
-    if lattice_obj is None or index >= len(lattice_obj.data.points):
-        return
-    matrix, frame, _frame_inverse = lattice_frame(lattice_obj)
-    lattice_obj.data.points[index].co_deform = matrix.inverted() @ (frame @ Vector(value))
-    lattice_obj.data.update_tag()
-
-
-def lattice_slice_handle_get(name: str, axis: int, slice_index: int):
-    """단면 핸들 값: 단면 점들의 평균 위치에 레일 오프셋을 더한 프레임 좌표."""
-    lattice_obj = bpy.data.objects.get(name)
-    if lattice_obj is None:
-        return (0.0, 0.0, 0.0)
+    점 핸들과 겹치지 않도록 (axis+1) 축의 음(-) 방향으로 래티스 반폭보다 조금 더 바깥에 둔다.
+    """
+    matrix = lattice_obj.matrix_world
+    points = lattice_obj.data.points
     indices = lattice_slice_indices(lattice_obj, axis, slice_index)
-    if not indices:
-        return (0.0, 0.0, 0.0)
-    matrix, _frame, frame_inverse = lattice_frame(lattice_obj)
-    points = lattice_obj.data.points
-    center = sum((frame_inverse @ (matrix @ points[index].co_deform) for index in indices), Vector()) / len(indices)
-    return tuple(center + lattice_rail_offset(lattice_obj, axis))
+    center = sum((matrix @ points[index].co_deform for index in indices), Vector()) / len(indices)
+    side = (axis + 1) % 3
+    half = matrix.to_scale()[side] * 0.5
+    direction = Vector((0.0, 0.0, 0.0))
+    direction[side] = -1.0
+    return center + matrix.to_quaternion() @ direction * half * (1.0 + LATTICE_RAIL_OFFSET)
 
 
-def lattice_slice_handle_set(name: str, axis: int, slice_index: int, value) -> None:
-    """단면 핸들을 끈 만큼 단면의 모든 점을 같은 거리만큼 옮긴다."""
-    lattice_obj = bpy.data.objects.get(name)
-    if lattice_obj is None:
-        return
-    delta = Vector(value) - Vector(lattice_slice_handle_get(name, axis, slice_index))
-    matrix, frame, _frame_inverse = lattice_frame(lattice_obj)
-    # 프레임 좌표 이동량을 래티스 로컬(스케일 포함) 이동량으로 바꾼다.
-    local_delta = matrix.to_3x3().inverted() @ (frame.to_3x3() @ delta)
-    points = lattice_obj.data.points
-    for index in lattice_slice_indices(lattice_obj, axis, slice_index):
-        points[index].co_deform = points[index].co_deform + local_delta
-    lattice_obj.data.update_tag()
+class LATTICE_OT_CatSelectHandle(Operator):
+    """핸들이 가리키는 래티스 점(또는 단면 전체 점)을 선택합니다. Object 모드면 래티스 Edit 모드로 들어가며, Shift+클릭은 선택에 추가하거나 뺍니다. 선택 후 G·R·S와 X·Y·Z로 축을 고정해 변형합니다."""
+    bl_idname = "lattice.cat_select_handle"
+    bl_label = "Select Lattice Handle"
+    bl_options = {'REGISTER', 'UNDO', 'INTERNAL'}
 
+    kind: EnumProperty(
+        name="Kind",
+        items=[
+            ('POINT', "Point", "래티스 점 하나"),
+            ('SLICE', "Slice", "한 축 단면의 모든 래티스 점"),
+        ],
+        default='POINT',
+    ) # type: ignore
+    index: IntProperty(name="Index", default=0, min=0) # type: ignore
+    axis: IntProperty(name="Axis", default=0, min=0, max=2) # type: ignore
+    extend: BoolProperty(name="Extend", default=False, options={'SKIP_SAVE'}) # type: ignore
 
-def _push_lattice_handle_undo():
-    """핸들 드래그가 끝난 뒤 Undo 단계를 남긴다. 기즈모 그리기 중에는 연산자를 부를 수 없어 타이머로 미룬다."""
-    windows = bpy.context.window_manager.windows
-    if windows:
-        with bpy.context.temp_override(window=windows[0]):
-            bpy.ops.ed.undo_push(message="Lattice Handle")
-    return None
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == 'LATTICE' and context.mode in {'OBJECT', 'EDIT_LATTICE'}
+
+    def invoke(self, context, event):
+        self.extend = event.shift
+        return self.execute(context)
+
+    def execute(self, context) -> Set[str]:
+        lattice_obj = context.active_object
+        if context.mode == 'OBJECT':
+            bpy.ops.object.mode_set(mode='EDIT')
+        points = lattice_obj.data.points
+        if self.kind == 'POINT':
+            if self.index >= len(points):
+                return {'CANCELLED'}
+            targets = [self.index]
+        else:
+            targets = lattice_slice_indices(lattice_obj, self.axis, self.index)
+            if not targets:
+                return {'CANCELLED'}
+        # Shift+클릭: 이미 모두 선택돼 있으면 빼고, 아니면 더한다 (Blender 선택 토글과 같은 동작).
+        select = not (self.extend and all(points[index].select for index in targets))
+        if not self.extend:
+            for point in points:
+                point.select = False
+        for index in targets:
+            points[index].select = select
+        lattice_obj.data.update_tag()
+        # 스크립트에서 부르면 영역이 없을 수 있다.
+        if context.area is not None:
+            context.area.tag_redraw()
+        return {'FINISHED'}
 
 
 class VIEW3D_GGT_CatLatticeHandles(GizmoGroup):
-    """CatTools로 만든 래티스를 선택하면 점·단면 핸들을 띄워 Object 모드에서 바로 끌어 변형하게 한다."""
+    """CatTools로 만든 래티스에 점·단면 선택 핸들을 띄운다. 클릭해 고른 뒤 Blender 기본 G·R·S로 변형한다."""
     bl_idname = "VIEW3D_GGT_cat_lattice_handles"
     bl_label = "CatTools Lattice Handles"
     bl_space_type = 'VIEW_3D'
@@ -1511,7 +1512,7 @@ class VIEW3D_GGT_CatLatticeHandles(GizmoGroup):
     def poll(cls, context):
         obj = context.active_object
         return (
-            context.mode == 'OBJECT'
+            context.mode in {'OBJECT', 'EDIT_LATTICE'}
             and obj is not None
             and obj.type == 'LATTICE'
             and obj.get(LATTICE_GIZMO_PROP, False)
@@ -1519,7 +1520,24 @@ class VIEW3D_GGT_CatLatticeHandles(GizmoGroup):
 
     def setup(self, context):
         self.layout_key = None
-        self.was_dragging = False
+        self.point_gizmos = []
+        self.slice_gizmos = []
+
+    def new_handle(self, color, size: float, kind: str, index: int, axis: int = 0):
+        """클릭하면 선택 연산자를 부르는 원형 핸들을 만든다."""
+        gizmo = self.gizmos.new("GIZMO_GT_move_3d")
+        gizmo.draw_style = 'RING_2D'
+        gizmo.draw_options = {'FILL', 'ALIGN_VIEW'}
+        gizmo.scale_basis = size
+        gizmo.color = color
+        gizmo.alpha = 0.6
+        gizmo.color_highlight = (1.0, 1.0, 1.0)
+        gizmo.alpha_highlight = 1.0
+        properties = gizmo.target_set_operator(LATTICE_OT_CatSelectHandle.bl_idname)
+        properties.kind = kind
+        properties.index = index
+        properties.axis = axis
+        return gizmo
 
     def rebuild(self, lattice_obj) -> None:
         """래티스 점 수가 바뀌면 핸들을 모두 다시 만든다."""
@@ -1527,43 +1545,18 @@ class VIEW3D_GGT_CatLatticeHandles(GizmoGroup):
             self.gizmos.remove(gizmo)
         data = lattice_obj.data
         points = (data.points_u, data.points_v, data.points_w)
-        name = lattice_obj.name
-
-        # 점 핸들: 래티스 점마다 작은 흰 링
-        for index in range(len(data.points)):
-            gizmo = self.gizmos.new("GIZMO_GT_move_3d")
-            gizmo.draw_style = 'RING_2D'
-            gizmo.draw_options = {'FILL', 'ALIGN_VIEW'}
-            gizmo.scale_basis = 0.07
-            gizmo.color = (0.9, 0.9, 0.9)
-            gizmo.alpha = 0.55
-            gizmo.color_highlight = (1.0, 1.0, 1.0)
-            gizmo.alpha_highlight = 1.0
-            gizmo.target_set_handler(
-                "offset",
-                get=lambda name=name, index=index: lattice_point_handle_get(name, index),
-                set=lambda value, name=name, index=index: lattice_point_handle_set(name, index, value),
-            )
-
-        # 단면 핸들: X·Y·Z 축 단면마다 축 색 링 (래티스 바깥 레일)
-        for axis in range(3):
-            for slice_index in range(points[axis]):
-                gizmo = self.gizmos.new("GIZMO_GT_move_3d")
-                gizmo.draw_style = 'RING_2D'
-                gizmo.draw_options = {'FILL', 'ALIGN_VIEW'}
-                gizmo.scale_basis = 0.14
-                gizmo.color = LATTICE_AXIS_COLORS[axis]
-                gizmo.alpha = 0.7
-                gizmo.color_highlight = LATTICE_AXIS_COLORS[axis]
-                gizmo.alpha_highlight = 1.0
-                gizmo.target_set_handler(
-                    "offset",
-                    get=lambda name=name, axis=axis, slice_index=slice_index: lattice_slice_handle_get(name, axis, slice_index),
-                    set=lambda value, name=name, axis=axis, slice_index=slice_index: lattice_slice_handle_set(
-                        name, axis, slice_index, value
-                    ),
-                )
-        self.layout_key = (name, points)
+        # 점 핸들: 래티스 점마다 작은 흰 원
+        self.point_gizmos = [
+            (self.new_handle(LATTICE_POINT_COLOR, 0.07, 'POINT', index), index)
+            for index in range(len(data.points))
+        ]
+        # 단면 핸들: X·Y·Z 축 단면마다 래티스 바깥 레일에 축 색 원
+        self.slice_gizmos = [
+            (self.new_handle(LATTICE_AXIS_COLORS[axis], 0.14, 'SLICE', slice_index, axis), axis, slice_index)
+            for axis in range(3)
+            for slice_index in range(points[axis])
+        ]
+        self.layout_key = (lattice_obj.name, points)
 
     def refresh(self, context):
         lattice_obj = context.active_object
@@ -1573,19 +1566,21 @@ class VIEW3D_GGT_CatLatticeHandles(GizmoGroup):
             self.rebuild(lattice_obj)
 
     def draw_prepare(self, context):
-        # 래티스를 옮기거나 돌려도 핸들이 따라가도록 기준 행렬(스케일 제외)을 매번 맞춘다.
-        _matrix, frame, _frame_inverse = lattice_frame(context.active_object)
-        for gizmo in self.gizmos:
-            gizmo.matrix_basis = frame
-        # 핸들 값은 래티스 점을 직접 바꾸므로 기즈모가 Undo를 남기지 않는다. 드래그가 끝나면 직접 남긴다.
-        dragging = any(gizmo.is_modal for gizmo in self.gizmos)
-        if self.was_dragging and not dragging and not bpy.app.timers.is_registered(_push_lattice_handle_undo):
-            bpy.app.timers.register(_push_lattice_handle_undo, first_interval=0.0)
-        self.was_dragging = dragging
+        # 점이 움직이거나 래티스를 옮겨도 핸들이 따라가도록 위치와 선택 색을 매번 맞춘다.
+        lattice_obj = context.active_object
+        matrix = lattice_obj.matrix_world
+        points = lattice_obj.data.points
+        for gizmo, index in self.point_gizmos:
+            gizmo.matrix_basis = Matrix.Translation(matrix @ points[index].co_deform)
+            gizmo.color = LATTICE_SELECTED_COLOR if points[index].select else LATTICE_POINT_COLOR
+        for gizmo, axis, slice_index in self.slice_gizmos:
+            gizmo.matrix_basis = Matrix.Translation(lattice_slice_handle_position(lattice_obj, axis, slice_index))
+            selected = all(points[index].select for index in lattice_slice_indices(lattice_obj, axis, slice_index))
+            gizmo.color = LATTICE_SELECTED_COLOR if selected else LATTICE_AXIS_COLORS[axis]
 
 
 class Add_Lattice(Operator):
-    """선택한 오브젝트의 실제 형상을 감싸는 Lattice를 만들고 Lattice 모디파이어로 연결합니다. 오리진 위치와 관계없이 형상 중심에 맞추며, 래티스를 선택하면 점·단면 핸들로 바로 변형할 수 있습니다."""
+    """선택한 오브젝트의 실제 형상을 감싸는 Lattice를 만들고 Lattice 모디파이어로 연결합니다. 오리진 위치와 관계없이 형상 중심에 맞추며, 래티스를 선택하면 점·단면 선택 핸들을 띄웁니다."""
     bl_label = "Lattice"
     bl_idname = "wm.add_lattice"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1611,10 +1606,10 @@ class Add_Lattice(Operator):
         default=0.1, min=0.0, soft_max=1.0,
         precision=3, subtype='DISTANCE', unit='LENGTH',
     ) # type: ignore
-    # 래티스를 선택하면 Object 모드에서 점·단면 핸들을 띄워 바로 끌어 변형한다.
+    # 래티스를 선택하면 점·단면 선택 핸들을 띄운다. 클릭해 고른 뒤 Blender 기본 G·R·S로 변형한다.
     handles: BoolProperty(
         name="Handles",
-        description="래티스를 선택하면 점·X·Y·Z 단면 핸들을 띄워 Edit 모드 없이 끌어서 변형합니다",
+        description="래티스를 선택하면 점·X·Y·Z 단면 선택 핸들을 띄웁니다. 클릭해 고른 뒤 G·R·S와 X·Y·Z 축 고정으로 변형합니다",
         default=True,
     ) # type: ignore
 
@@ -1681,7 +1676,7 @@ class Add_Lattice(Operator):
             lattice_obj[LATTICE_GIZMO_PROP] = self.handles
             lattices.append(lattice_obj)
 
-        # 바로 핸들을 끌거나 Tab으로 편집할 수 있도록 만든 래티스만 선택한다.
+        # 바로 핸들을 클릭하거나 Tab으로 편집할 수 있도록 만든 래티스만 선택한다.
         for obj in context.selected_objects:
             obj.select_set(False)
         for lattice_obj in lattices:
@@ -3424,6 +3419,7 @@ classes = [
     SHADER_OP_Catoon,
     # PALETTE_OP_RGB,
     Add_Lattice,
+    LATTICE_OT_CatSelectHandle,
     VIEW3D_GGT_CatLatticeHandles,
     Add_Mirror_X_Modifier,
     Add_Mirror_Y_Modifier,
@@ -3455,8 +3451,6 @@ def unregister():
         bpy.app.timers.unregister(_activate_cat_tab_timer)
     if bpy.app.timers.is_registered(_open_cat_sidebars_timer):
         bpy.app.timers.unregister(_open_cat_sidebars_timer)
-    if bpy.app.timers.is_registered(_push_lattice_handle_undo):
-        bpy.app.timers.unregister(_push_lattice_handle_undo)
     bpy.types.VIEW3D_HT_header.remove(draw_cat_header_button)
     unregister_keymaps()
     for handlers in EDIT_RESET_HANDLERS:

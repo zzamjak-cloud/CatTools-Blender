@@ -80,50 +80,56 @@ def create_tall_box(name: str):
 
 
 def check_handles(addon) -> None:
-    """핸들 값 함수(점·단면)가 래티스 점을 옮겨 형상을 바꾸는지 검사한다. 실제 드래그는 GUI 검사에서 확인한다."""
+    """선택 핸들: 클릭 연산자가 점·단면을 고르고 Edit 모드로 들어가는지 검사한다. 실제 클릭·G·R·S는 GUI 검사에서 확인한다."""
     obj = create_tall_box("HandleTarget")
     obj.rotation_euler = (0.0, 0.0, math.radians(30.0))
     bpy.context.view_layer.update()
-    rest = evaluated_world_verts(obj)
     assert bpy.ops.wm.add_lattice(resolution_mode="AXIS", resolution_z=2) == {"FINISHED"}
     lattice = bpy.data.objects["HandleTarget_Lattice"]
     assert lattice.get(addon.LATTICE_GIZMO_PROP) is True, "Handles 기본값이 꺼져 있습니다."
-    assert not any(o.type == "ARMATURE" for o in bpy.data.objects), "더 이상 Armature 가이드를 만들지 않아야 합니다."
-    assert addon.VIEW3D_GGT_CatLatticeHandles.poll(bpy.context), "래티스를 선택했는데 핸들 그룹이 뜨지 않습니다."
+    assert not any(o.type == "ARMATURE" for o in bpy.data.objects), "Armature 가이드를 만들지 않아야 합니다."
+    assert addon.VIEW3D_GGT_CatLatticeHandles.poll(bpy.context), "래티스를 선택했는데 핸들이 뜨지 않습니다."
     points = lattice.data.points
-    matrix = lattice.matrix_world
 
-    # 점 핸들: 값은 래티스 점의 월드 위치(스케일 없는 프레임 좌표)이고, 바꾸면 그 점만 이동한다.
-    index = len(points) - 1
-    value = Vector(addon.lattice_point_handle_get(lattice.name, index))
-    _m, frame, _fi = addon.lattice_frame(lattice)
-    assert ((frame @ value) - (matrix @ points[index].co_deform)).length < EPSILON
-    before = [p.co_deform.copy() for p in points]
-    addon.lattice_point_handle_set(lattice.name, index, value + Vector((0.0, 0.0, 0.5)))
-    moved = [i for i, p in enumerate(points) if (p.co_deform - before[i]).length > 1e-6]
-    assert moved == [index], moved
-    world_shift = matrix @ points[index].co_deform - matrix @ before[index]
-    assert abs(world_shift.length - 0.5) < EPSILON, world_shift
-    bpy.context.view_layer.update()
-    assert max((a - b).length for a, b in zip(rest, evaluated_world_verts(obj))) > 0.05, "점 핸들이 형상에 반영되지 않았습니다."
-
-    # 단면 핸들: X·Y·Z 각 축 단면이 모두 있고, 끌면 그 단면 점만 같은 거리로 이동한다.
+    # X·Y·Z 각 축 단면이 모두 있다 (2 x 2 x 4 점).
     for axis, count in enumerate((2, 2, 4)):
         for slice_index in range(count):
             assert len(addon.lattice_slice_indices(lattice, axis, slice_index)) == len(points) // count
-    before = [p.co_deform.copy() for p in points]
-    handle = Vector(addon.lattice_slice_handle_get(lattice.name, 2, 1))
-    addon.lattice_slice_handle_set(lattice.name, 2, 1, handle + Vector((0.3, 0.0, 0.0)))
-    expected = set(addon.lattice_slice_indices(lattice, 2, 1))
-    moved = {i for i, p in enumerate(points) if (p.co_deform - before[i]).length > 1e-6}
-    assert moved == expected, (moved, expected)
-    shifts = [matrix @ points[i].co_deform - matrix @ before[i] for i in expected]
-    assert all(abs(shift.length - 0.3) < EPSILON for shift in shifts), shifts
-    after = Vector(addon.lattice_slice_handle_get(lattice.name, 2, 1))
-    assert (after - handle - Vector((0.3, 0.0, 0.0))).length < EPSILON, "단면 핸들이 끈 위치를 따라가지 않습니다."
 
-    # Handles를 끄면 핸들 그룹이 뜨지 않는다.
+    # 단면 핸들은 래티스 바깥 레일에 있어 점 핸들과 겹치지 않는다.
+    inverse = lattice.matrix_world.inverted()
+    for axis in range(3):
+        local = inverse @ addon.lattice_slice_handle_position(lattice, axis, 0)
+        side = (axis + 1) % 3
+        assert local[side] < -0.5, f"{'XYZ'[axis]} 단면 핸들이 래티스 안쪽에 있습니다: {tuple(local)}"
+
+    # 점 핸들 클릭: Object 모드에서 래티스 Edit 모드로 들어가 그 점만 선택한다.
+    assert bpy.ops.lattice.cat_select_handle(kind="POINT", index=5) == {"FINISHED"}
+    assert bpy.context.mode == "EDIT_LATTICE"
+    assert addon.VIEW3D_GGT_CatLatticeHandles.poll(bpy.context), "Edit 모드에서 핸들이 사라졌습니다."
+    points = lattice.data.points
+    assert [i for i, p in enumerate(points) if p.select] == [5]
+
+    # 단면 핸들 클릭: 그 단면 점만 선택한다.
+    assert bpy.ops.lattice.cat_select_handle(kind="SLICE", axis=2, index=3) == {"FINISHED"}
+    expected = set(addon.lattice_slice_indices(lattice, 2, 3))
+    assert {i for i, p in enumerate(points) if p.select} == expected
+
+    # Shift+클릭(extend): 추가하고, 이미 선택된 대상이면 뺀다.
+    assert bpy.ops.lattice.cat_select_handle(kind="POINT", index=0, extend=True) == {"FINISHED"}
+    assert {i for i, p in enumerate(points) if p.select} == expected | {0}
+    assert bpy.ops.lattice.cat_select_handle(kind="SLICE", axis=2, index=3, extend=True) == {"FINISHED"}
+    assert {i for i, p in enumerate(points) if p.select} == {0}
+
+    # 선택한 점은 Blender 기본 변형(축 고정)으로 움직인다.
+    before = [p.co_deform.copy() for p in points]
+    bpy.ops.transform.translate(value=(0.0, 0.0, 0.4), constraint_axis=(False, False, True))
+    moved = [i for i, p in enumerate(points) if (p.co_deform - before[i]).length > 1e-6]
+    assert moved == [0], moved
+    bpy.ops.object.mode_set(mode="OBJECT")
     remove_all_objects()
+
+    # Handles를 끄면 핸들이 뜨지 않는다.
     create_tall_box("NoHandles")
     assert bpy.ops.wm.add_lattice(handles=False) == {"FINISHED"}
     assert not addon.VIEW3D_GGT_CatLatticeHandles.poll(bpy.context)
