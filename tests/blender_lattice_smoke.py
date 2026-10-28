@@ -79,86 +79,54 @@ def create_tall_box(name: str):
     return obj
 
 
-def check_guides() -> None:
-    obj = create_tall_box("GuideTarget")
+def check_handles(addon) -> None:
+    """핸들 값 함수(점·단면)가 래티스 점을 옮겨 형상을 바꾸는지 검사한다. 실제 드래그는 GUI 검사에서 확인한다."""
+    obj = create_tall_box("HandleTarget")
+    obj.rotation_euler = (0.0, 0.0, math.radians(30.0))
+    bpy.context.view_layer.update()
     rest = evaluated_world_verts(obj)
-    assert bpy.ops.wm.add_lattice(resolution_mode="AXIS", resolution_z=2, add_guides=True) == {"FINISHED"}
-    lattice = bpy.data.objects["GuideTarget_Lattice"]
-    rig = bpy.data.objects["GuideTarget_LatticeGuide"]
-    assert rig.type == "ARMATURE"
-    assert bpy.context.view_layer.objects.active is rig, "가이드 아마추어가 활성화되지 않았습니다."
-    assert bpy.context.object.mode == "OBJECT"
+    assert bpy.ops.wm.add_lattice(resolution_mode="AXIS", resolution_z=2) == {"FINISHED"}
+    lattice = bpy.data.objects["HandleTarget_Lattice"]
+    assert lattice.get(addon.LATTICE_GIZMO_PROP) is True, "Handles 기본값이 꺼져 있습니다."
+    assert not any(o.type == "ARMATURE" for o in bpy.data.objects), "더 이상 Armature 가이드를 만들지 않아야 합니다."
+    assert addon.VIEW3D_GGT_CatLatticeHandles.poll(bpy.context), "래티스를 선택했는데 핸들 그룹이 뜨지 않습니다."
+    points = lattice.data.points
+    matrix = lattice.matrix_world
 
-    # Auto 축은 가장 긴 Z축이고, Z 해상도 2 → 단면 4개 → 본 4개의 체인
-    bones = rig.data.bones
-    assert [bone.name for bone in bones] == [f"Guide.{index:03d}" for index in range(4)], [b.name for b in bones]
-    for index in range(1, 4):
-        assert bones[index].parent == bones[index - 1], "가이드 본이 체인으로 이어지지 않았습니다."
-        assert not bones[index].use_connect, "가이드 본이 붙어 있으면 개별 이동이 안 됩니다."
-    heads = [rig.matrix_world @ bone.head_local for bone in bones]
-    assert all(heads[i].z < heads[i + 1].z for i in range(3)), heads
-
-    # 단면마다 래티스 점 4개(2x2)가 해당 본 그룹에 묶인다.
-    data = lattice.data
-    assert (data.points_u, data.points_v, data.points_w) == (2, 2, 4)
-    for index, bone in enumerate(bones):
-        group = lattice.vertex_groups[bone.name]
-        members = []
-        for point_index, point in enumerate(data.points):
-            if any(g.group == group.index and g.weight == 1.0 for g in point.groups):
-                members.append(point_index)
-        assert len(members) == 4, f"{bone.name} 단면 점 수가 다릅니다: {members}"
-        assert all(point_index // 4 == index for point_index in members), members
-    assert lattice.modifiers["Guides"].object is rig
-
-    # 포즈를 주지 않으면 형상이 그대로다.
-    assert max((a - b).length for a, b in zip(rest, evaluated_world_verts(obj))) < 1e-4
-
-    # 첫 본(뿌리)을 옮기면 체인 전체가 따라와 형상이 통째로 이동한다.
-    root = rig.pose.bones["Guide.000"]
-    root.location = (0.0, 0.0, 0.5)
+    # 점 핸들: 값은 래티스 점의 월드 위치(스케일 없는 프레임 좌표)이고, 바꾸면 그 점만 이동한다.
+    index = len(points) - 1
+    value = Vector(addon.lattice_point_handle_get(lattice.name, index))
+    _m, frame, _fi = addon.lattice_frame(lattice)
+    assert ((frame @ value) - (matrix @ points[index].co_deform)).length < EPSILON
+    before = [p.co_deform.copy() for p in points]
+    addon.lattice_point_handle_set(lattice.name, index, value + Vector((0.0, 0.0, 0.5)))
+    moved = [i for i, p in enumerate(points) if (p.co_deform - before[i]).length > 1e-6]
+    assert moved == [index], moved
+    world_shift = matrix @ points[index].co_deform - matrix @ before[index]
+    assert abs(world_shift.length - 0.5) < EPSILON, world_shift
     bpy.context.view_layer.update()
-    moved = evaluated_world_verts(obj)
-    offsets = [b - a for a, b in zip(rest, moved)]
-    assert all((offset - offsets[0]).length < 1e-3 for offset in offsets), "뿌리 이동이 형상을 통째로 옮기지 않았습니다."
-    assert abs(offsets[0].length - 0.5) < 1e-3, offsets[0]
-    root.location = (0.0, 0.0, 0.0)
+    assert max((a - b).length for a, b in zip(rest, evaluated_world_verts(obj))) > 0.05, "점 핸들이 형상에 반영되지 않았습니다."
 
-    # 맨 위 본만 키우면 위쪽은 넓어지고 맨 아래는 거의 그대로다.
-    top = rig.pose.bones["Guide.003"]
-    top.scale = (2.0, 1.0, 2.0)
-    bpy.context.view_layer.update()
-    scaled = evaluated_world_verts(obj)
-    # 본 축 위의 점은 스케일·비틀기로 움직이지 않으므로 축에서 가장 먼 위·아래 모서리 정점을 쓴다.
-    top_index = max(range(len(rest)), key=lambda i: (round(rest[i].z, 4), abs(rest[i].x - 2.0) + abs(rest[i].y)))
-    bottom_index = min(range(len(rest)), key=lambda i: (round(rest[i].z, 4), -(abs(rest[i].x - 2.0) + abs(rest[i].y))))
-    assert (scaled[top_index] - rest[top_index]).length > 0.1, "맨 위 가이드 스케일이 반영되지 않았습니다."
-    assert (scaled[bottom_index] - rest[bottom_index]).length < 0.05, "맨 아래가 함께 변형되었습니다."
-    top.scale = (1.0, 1.0, 1.0)
+    # 단면 핸들: X·Y·Z 각 축 단면이 모두 있고, 끌면 그 단면 점만 같은 거리로 이동한다.
+    for axis, count in enumerate((2, 2, 4)):
+        for slice_index in range(count):
+            assert len(addon.lattice_slice_indices(lattice, axis, slice_index)) == len(points) // count
+    before = [p.co_deform.copy() for p in points]
+    handle = Vector(addon.lattice_slice_handle_get(lattice.name, 2, 1))
+    addon.lattice_slice_handle_set(lattice.name, 2, 1, handle + Vector((0.3, 0.0, 0.0)))
+    expected = set(addon.lattice_slice_indices(lattice, 2, 1))
+    moved = {i for i, p in enumerate(points) if (p.co_deform - before[i]).length > 1e-6}
+    assert moved == expected, (moved, expected)
+    shifts = [matrix @ points[i].co_deform - matrix @ before[i] for i in expected]
+    assert all(abs(shift.length - 0.3) < EPSILON for shift in shifts), shifts
+    after = Vector(addon.lattice_slice_handle_get(lattice.name, 2, 1))
+    assert (after - handle - Vector((0.3, 0.0, 0.0))).length < EPSILON, "단면 핸들이 끈 위치를 따라가지 않습니다."
 
-    # 맨 아래 본을 줄여도 스케일은 위 단면으로 전달되지 않는다.
-    root.scale = (0.5, 1.0, 0.5)
-    bpy.context.view_layer.update()
-    tapered = evaluated_world_verts(obj)
-    assert (tapered[bottom_index] - rest[bottom_index]).length > 0.1, "맨 아래 가이드 스케일이 반영되지 않았습니다."
-    assert (tapered[top_index] - rest[top_index]).length < 0.05, "아래 가이드 스케일이 위로 전달되었습니다."
-    root.scale = (1.0, 1.0, 1.0)
-
-    # 가운데 본을 비틀면 그 위쪽 단면이 회전한다 (FK).
-    middle = rig.pose.bones["Guide.001"]
-    middle.rotation_quaternion = Quaternion((0.0, 1.0, 0.0), math.radians(45.0))
-    bpy.context.view_layer.update()
-    twisted = evaluated_world_verts(obj)
-    assert (twisted[top_index] - rest[top_index]).length > 0.1, "가운데 가이드 회전이 위쪽에 전달되지 않았습니다."
+    # Handles를 끄면 핸들 그룹이 뜨지 않는다.
     remove_all_objects()
-
-    # 축을 직접 고르면 그 축으로 단면을 나눈다.
-    create_tall_box("GuideAxisX")
-    assert bpy.ops.wm.add_lattice(lattice_resolution=1, add_guides=True, guide_axis="X") == {"FINISHED"}
-    rig = bpy.data.objects["GuideAxisX_LatticeGuide"]
-    assert len(rig.data.bones) == 3
-    heads = [rig.matrix_world @ bone.head_local for bone in rig.data.bones]
-    assert all(abs(head.z - heads[0].z) < 1e-4 for head in heads) and heads[0].x < heads[2].x, heads
+    create_tall_box("NoHandles")
+    assert bpy.ops.wm.add_lattice(handles=False) == {"FINISHED"}
+    assert not addon.VIEW3D_GGT_CatLatticeHandles.poll(bpy.context)
     remove_all_objects()
 
 
@@ -169,7 +137,7 @@ def main() -> None:
         obj = create_offset_box("LatticeTarget")
         before = [obj.matrix_world @ v.co for v in obj.data.vertices]
 
-        assert bpy.ops.wm.add_lattice(add_guides=False) == {"FINISHED"}
+        assert bpy.ops.wm.add_lattice() == {"FINISHED"}
         lattice = bpy.data.objects["LatticeTarget_Lattice"]
         assert obj.modifiers["Lattice"].object is lattice, "Lattice 모디파이어가 연결되지 않았습니다."
         assert bpy.context.view_layer.objects.active is lattice, "만든 래티스가 활성화되지 않았습니다."
@@ -236,14 +204,8 @@ def main() -> None:
         assert bpy.ops.wm.add_lattice() == {"CANCELLED"}, "Empty만 선택했는데 Lattice가 실행되었습니다."
         assert "OnlyEmpty_Lattice" not in bpy.data.objects
 
-        # 기본값으로 실행하면 가이드가 함께 만들어지고, 가이드가 선택된 상태에서도 poll이 통과한다.
-        create_tall_box("GuideDefault")
-        assert bpy.ops.wm.add_lattice() == {"FINISHED"}
-        assert "GuideDefault_LatticeGuide" in bpy.data.objects, "Guides 기본값이 꺼져 있습니다."
-        assert bpy.ops.wm.add_lattice.poll(), "가이드 생성 후 poll이 실패해 Adjust Last Operation 패널이 숨겨집니다."
-
         remove_all_objects()
-        check_guides()
+        check_handles(addon)
 
         print("CatTools Lattice smoke test passed")
     finally:

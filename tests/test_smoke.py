@@ -50,6 +50,7 @@ EXPECTED_REGISTERED_CLASSES = [
     "SHADER_OP_TwoSideTex",
     "SHADER_OP_Catoon",
     "Add_Lattice",
+    "VIEW3D_GGT_CatLatticeHandles",
     "Add_Mirror_X_Modifier",
     "Add_Mirror_Y_Modifier",
     "Add_Mirror_Z_Modifier",
@@ -139,7 +140,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], "1.0.0")
         self.assertEqual(manifest["id"], "cat_tools")
         self.assertEqual(manifest["name"], "CatTools")
-        self.assertEqual(manifest["version"], "1.15.1")
+        self.assertEqual(manifest["version"], "1.16.0")
         self.assertEqual(manifest["blender_version_min"], "4.2.0")
         self.assertIn("SPDX:GPL-3.0-or-later", manifest["license"])
 
@@ -152,7 +153,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         info = ast.literal_eval(info_node.value)
         self.assertEqual(info["name"], "CatTools")
-        self.assertEqual(info["version"], (1, 15, 1))
+        self.assertEqual(info["version"], (1, 16, 0))
         self.assertEqual(info["blender"], (4, 2, 0))
 
     def test_registered_class_order(self) -> None:
@@ -507,11 +508,13 @@ class CatToolsSmokeTest(unittest.TestCase):
         for name in ("resolution_mode", "lattice_resolution", "resolution_x", "resolution_y", "resolution_z", "margin"):
             self.assertIn(f"{name}: ", operator)
         self.assertIn("object_world_bounds(obj)", operator)
-        # 가이드: 단면마다 본 체인 + 래티스 Armature 모디파이어
-        for name in ("add_guides", "guide_axis"):
-            self.assertIn(f"{name}: ", operator)
-        self.assertIn("build_lattice_guides(context, lattice_obj, axis", operator)
-        self.assertIn("bone.inherit_scale = 'NONE'", self.source)
+        # 핸들: 래티스에 표시 속성을 달고, 기즈모 그룹이 점·X·Y·Z 단면 핸들을 띄운다.
+        self.assertIn("handles: ", operator)
+        self.assertIn("lattice_obj[LATTICE_GIZMO_PROP] = self.handles", operator)
+        gizmo_group = ast.unparse(self.classes["VIEW3D_GGT_CatLatticeHandles"])
+        self.assertIn("for axis in range(3):", gizmo_group)
+        self.assertIn('bpy.ops.ed.undo_push(message="Lattice Handle")', self.source)
+        self.assertNotIn("build_lattice_guides", self.source)
         # 실행 후 선택이 바뀌어도 Adjust Last Operation 패널이 뜨도록 poll은 모드만 검사한다.
         poll = next(
             node

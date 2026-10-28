@@ -92,7 +92,7 @@ Modifier Apply의 활성화 조건과 모디파이어 적용을 확인하려면 
 ./scripts/dev_run.sh --background --python tests/blender_apply_modifiers_smoke.py
 ```
 
-Lattice의 형상 맞춤, 축별 해상도, Guides(단면 가이드 본)를 확인하려면 다음 검사를 실행합니다.
+Lattice의 형상 맞춤, 축별 해상도, 점·단면 핸들을 확인하려면 다음 검사를 실행합니다.
 
 ```bash
 ./scripts/dev_run.sh --background --python tests/blender_lattice_smoke.py
