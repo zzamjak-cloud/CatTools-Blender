@@ -223,13 +223,48 @@ def main() -> None:
         assert len(mesh.vertices) == 6 * 6 and len(mesh.polygons) == 6 * 5
         assert all(len(p.vertices) == 4 for p in mesh.polygons)
 
-        # 8) 원통이 아닌 형태(Suzanne)나 원래보다 많은 각은 손대지 않고 취소한다
+        # 8) 90° 휘어진 호스(공통 축 없음): 사각형 면 연결로 링을 찾아 링마다 제자리에서 6각으로 펼친다
         clear_scene()
-        bpy.ops.mesh.primitive_monkey_add()
-        obj = bpy.context.active_object
-        before = len(obj.data.vertices)
-        assert bpy.ops.mesh.cat_reduce_sides(sides=6) == {"CANCELLED"}
-        assert len(obj.data.vertices) == before
+        mesh = bpy.data.meshes.new("Hose")
+        obj = bpy.data.objects.new("Hose", mesh)
+        bpy.context.collection.objects.link(obj)
+        bm = bmesh.new()
+        rings = []
+        for r in range(7):
+            bend = math.radians(15.0 * r)
+            frame = Matrix.Rotation(bend, 4, "Y") @ Matrix.Translation((-2.0, 0.0, 0.0))
+            rings.append([bm.verts.new(frame @ Vector((0.3 * math.cos(2 * math.pi * i / 8),
+                                                      0.3 * math.sin(2 * math.pi * i / 8), 0.0))) for i in range(8)])
+        for r in range(6):
+            for i in range(8):
+                bm.faces.new((rings[r][i], rings[r][(i + 1) % 8], rings[r + 1][(i + 1) % 8], rings[r + 1][i]))
+        centers = [sum((v.co for v in ring), Vector()) / 8 for ring in rings]
+        bm.to_mesh(mesh)
+        bm.free()
+        bpy.ops.object.select_all(action="DESELECT")
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        assert bpy.ops.mesh.cat_reduce_sides(sides=6) == {"FINISHED"}
+        assert len(mesh.vertices) == 6 * 7 and len(mesh.polygons) == 6 * 6
+        for center in centers:
+            ring = [v.co for v in mesh.vertices if abs((v.co - center).length - 0.3) < 1e-4]
+            assert len(ring) == 6, len(ring)
+            assert (sum(ring, Vector()) / 6 - center).length < 1e-4
+            gaps = [(a - b).length for a in ring for b in ring if a is not b]
+            assert abs(min(gaps) - 0.3) < 1e-4, min(gaps)
+
+        # 9) 원통이 아닌 형태(분할한 큐브, 격자 평면)나 원래보다 많은 각은 손대지 않고 취소한다
+        for add in (lambda: bpy.ops.mesh.primitive_cube_add(), lambda: bpy.ops.mesh.primitive_grid_add()):
+            clear_scene()
+            add()
+            obj = bpy.context.active_object
+            bpy.ops.object.mode_set(mode="EDIT")
+            bpy.ops.mesh.select_all(action="SELECT")
+            bpy.ops.mesh.subdivide(number_cuts=2)
+            bpy.ops.object.mode_set(mode="OBJECT")
+            before = len(obj.data.vertices)
+            assert bpy.ops.mesh.cat_reduce_sides(sides=6) == {"CANCELLED"}
+            assert len(obj.data.vertices) == before
         clear_scene()
         bpy.ops.mesh.primitive_cylinder_add(vertices=8)
         obj = bpy.context.active_object

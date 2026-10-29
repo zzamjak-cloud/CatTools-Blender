@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 23, 2),
+    "version": (1, 23, 3),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -3603,6 +3603,162 @@ def spoke_layout(verts, center: Vector, axis: Vector):
     return spokes, index, clarity / max(len(edges), 1)
 
 
+def spoke_cycle_order(neighbors: dict):
+    """살마다 둘레 선으로 이웃한 살 집합에서 한 바퀴 도는 순서를 만든다. 고리가 아니면 None."""
+    if len(neighbors) < 3 or any(len(linked) != 2 for linked in neighbors.values()):
+        return None
+    order = [0]
+    previous, current = 0, min(neighbors[0])
+    while current != 0:
+        order.append(current)
+        previous, current = current, next(n for n in neighbors[current] if n != previous)
+    return order if len(order) == len(neighbors) else None
+
+
+def topology_spoke_layout(verts):
+    """
+    사각형 면 연결만으로 링(둘레 고리)과 살(세로 줄)을 찾는다. 축이 휘어진 관(호스)도 처리한다.
+
+    사각형의 마주보는 선은 같은 종류, 이웃한 선은 다른 종류라는 규칙으로 선을 두 종류로 나누고,
+    모두 닫힌 고리를 이루는 종류를 둘레 선으로 본다. 뚜껑 부채꼴 중심·원뿔 꼭짓점처럼
+    분류된 선이 없는 정점은 축 위 정점(-1)으로 둔다.
+
+    Returns:
+        (살 목록 [(고리 순서 각도, [정점...])], 정점 → 살 번호) 또는 None
+    """
+    inside = set(verts)
+    quads = {
+        face for vert in verts for face in vert.link_faces
+        if len(face.verts) == 4 and all(other in inside for other in face.verts)
+    }
+    if not quads:
+        return None
+    kind = {}
+    first = next(iter(quads))
+    stack = []
+    for position, loop in enumerate(first.loops):
+        kind[loop.edge] = position % 2
+        stack.append(loop.edge)
+    reached = {first}
+    while stack:
+        edge = stack.pop()
+        for face in edge.link_faces:
+            if face not in quads:
+                continue
+            reached.add(face)
+            edges = [loop.edge for loop in face.loops]
+            position = edges.index(edge)
+            for step in range(1, 4):
+                other = edges[(position + step) % 4]
+                expected = kind[edge] if step == 2 else 1 - kind[edge]
+                if other in kind:
+                    if kind[other] != expected:
+                        return None
+                else:
+                    kind[other] = expected
+                    stack.append(other)
+    if len(reached) != len(quads):
+        return None
+    # 둘레 선 종류: 그 종류의 선이 닿는 모든 정점에서 정확히 두 개씩 만나 닫힌 고리만 이룬다.
+    degree = [{}, {}]
+    for edge, value in kind.items():
+        for vert in edge.verts:
+            degree[value][vert] = degree[value].get(vert, 0) + 1
+    cyclic = [all(count == 2 for count in degree[value].values()) for value in (0, 1)]
+    if cyclic[0] == cyclic[1]:
+        return None
+    ring_kind = 0 if cyclic[0] else 1
+    classified = {vert for edge in kind for vert in edge.verts}
+    on_axis = {vert for vert in verts if vert not in classified}
+    parent = {vert: vert for vert in verts if vert not in on_axis}
+
+    def root_of(vert):
+        while parent[vert] is not vert:
+            parent[vert] = parent[parent[vert]]
+            vert = parent[vert]
+        return vert
+
+    ring_edges = []
+    for edge in {edge for vert in verts for edge in vert.link_edges}:
+        a, b = edge.verts
+        if a not in inside or b not in inside:
+            continue
+        if edge not in kind:
+            # 분류되지 않은 선은 축 위 정점(부채꼴 중심)으로 가는 선만 허용한다.
+            if a in on_axis or b in on_axis:
+                continue
+            return None
+        if kind[edge] == ring_kind:
+            ring_edges.append((a, b))
+        else:
+            parent[root_of(a)] = root_of(b)
+    groups = {}
+    for vert in parent:
+        groups.setdefault(root_of(vert), []).append(vert)
+    roots = list(groups)
+    number_of = {root: number for number, root in enumerate(roots)}
+    index = {vert: -1 for vert in on_axis}
+    for root, members in groups.items():
+        for vert in members:
+            index[vert] = number_of[root]
+    neighbors = {number: set() for number in range(len(roots))}
+    for a, b in ring_edges:
+        if index[a] == index[b]:
+            return None
+        neighbors[index[a]].add(index[b])
+        neighbors[index[b]].add(index[a])
+    order = spoke_cycle_order(neighbors)
+    if order is None:
+        return None
+    # 휘어진 관에는 공통 축이 없으므로, 살의 각도는 고리 순서대로 고르게 놓였다고 본다.
+    count = len(order)
+    angles = {number: 2.0 * math.pi * position / count for position, number in enumerate(order)}
+    return [(angles[number], groups[root]) for number, root in enumerate(roots)], index
+
+
+def spoke_rings(verts, index) -> list:
+    """
+    서로 다른 살을 잇는 둘레 선으로 이어진 링을 고리 순서대로 모은다.
+
+    Returns:
+        [(순서대로 늘어선 링 정점들, 링 중심, 링 노멀)]. 살마다 정점 하나씩 지나는 링만 담는다.
+    """
+    links = {}
+    for vert in verts:
+        if index.get(vert, -1) < 0:
+            continue
+        for edge in vert.link_edges:
+            other = edge.other_vert(vert)
+            if index.get(other, -1) >= 0 and index[other] != index[vert]:
+                links.setdefault(vert, []).append(other)
+    count = len({number for number in index.values() if number >= 0})
+    rings = []
+    visited = set()
+    for start in links:
+        if start in visited or len(links[start]) != 2:
+            continue
+        ring = [start]
+        visited.add(start)
+        previous, current = start, links[start][0]
+        while current is not start and current not in visited and len(links.get(current, ())) == 2:
+            ring.append(current)
+            visited.add(current)
+            previous, current = current, next((v for v in links[current] if v is not previous), None)
+            if current is None:
+                break
+        if current is not start or len(ring) != count or len({index[vert] for vert in ring}) != count:
+            continue
+        center = sum((vert.co for vert in ring), Vector()) / count
+        # Newell 노멀: 링 순서대로 돌 때 반시계 방향이 되는 노멀
+        normal = Vector()
+        for position, vert in enumerate(ring):
+            normal += (vert.co - center).cross(ring[(position + 1) % count].co - center)
+        if normal.length <= 1e-12:
+            continue
+        rings.append((ring, center, normal.normalized()))
+    return rings
+
+
 def find_spoke_layout(verts, axis_mode: str):
     """축을 정하고 살로 묶는다. Auto면 로컬 X·Y·Z와 정점 분포의 주축 중 선이 둘레·세로로 가장 또렷하게 나뉘는 축을 고른다."""
     center = sum((vert.co for vert in verts), Vector()) / len(verts)
@@ -3659,15 +3815,22 @@ def reduce_sides(bm, verts, sides: int, axis_mode: str, offset: int, keep_area: 
     Returns:
         (원래 각 수, 오류 메시지 또는 None)
     """
-    found = find_spoke_layout(verts, axis_mode)
-    if found is None:
-        return 0, "shape"
-    center, axis, (spokes, index, _clarity) = found
+    # 사각형 면 연결로 먼저 찾고(휘어진 관 포함), 옆면이 삼각형인 원뿔 등은 곧은 축 기준으로 찾는다.
+    layout = topology_spoke_layout(verts) if axis_mode == 'AUTO' else None
+    if layout is None:
+        found = find_spoke_layout(verts, axis_mode)
+        if found is None:
+            return 0, "shape"
+        _center, _axis, (spokes, index, _clarity) = found
+    else:
+        spokes, index = layout
     count = len(spokes)
     if sides >= count:
         return count, "sides"
     kept = pick_kept_spokes([angle for angle, _verts in spokes], sides, offset)
     kept_numbers = {number for number, _target in kept}
+    # 지우기 전에 링(순서·중심·노멀)을 구해 둔다. 남긴 정점은 링마다 그 링의 중심과 노멀 둘레에서 다시 펼친다.
+    rings = spoke_rings(verts, index)
     removed = {vert for number, (_angle, spoke) in enumerate(spokes) if number not in kept_numbers for vert in spoke}
     # 지울 살 안의 선(세로·지름 방향)과 그 살에서 축 위 정점으로 가는 선을 녹인다. 남은 둘레 정점도 함께 녹인다.
     edges = {
@@ -3680,16 +3843,31 @@ def reduce_sides(bm, verts, sides: int, axis_mode: str, offset: int, keep_area: 
     leftover = [vert for vert in removed if vert.is_valid and len(vert.link_edges) == 2]
     if leftover:
         bmesh.ops.dissolve_verts(bm, verts=leftover)
-    # 남긴 살을 목표 각도로 돌리고, 원하면 단면 넓이가 같도록 반지름을 넓힌다.
+    # 링마다 남긴 정점을 고른 간격으로 다시 펼친다. 움직임이 가장 작도록 시작 각도를 정하고,
+    # 정점마다 링 중심에서의 거리와 노멀 방향 높이는 그대로 둔다. 원하면 단면 넓이가 같도록 반지름을 넓힌다.
     scale = 1.0
     if keep_area:
         scale = math.sqrt((count * math.sin(2.0 * math.pi / count)) / (sides * math.sin(2.0 * math.pi / sides)))
-    for number, target in kept:
-        rotation = Matrix.Rotation(target - spokes[number][0], 3, axis)
-        for vert in spokes[number][1]:
+    for ring, center, normal in rings:
+        remaining = [vert for vert in ring if index[vert] in kept_numbers and vert.is_valid]
+        if len(remaining) != sides:
+            continue
+        u = plane_axis(normal, remaining[0].co - center)
+        v = normal.cross(u)
+        polar = []
+        for vert in remaining:
             offset_vec = vert.co - center
-            height = axis * offset_vec.dot(axis)
-            vert.co = center + height + rotation @ (offset_vec - height) * scale
+            height = offset_vec.dot(normal)
+            flat = offset_vec - normal * height
+            polar.append((math.atan2(flat.dot(v), flat.dot(u)), flat.length, height))
+        step = 2.0 * math.pi / sides
+        phase = math.atan2(
+            sum(math.sin(angle - step * k) for k, (angle, _r, _h) in enumerate(polar)),
+            sum(math.cos(angle - step * k) for k, (angle, _r, _h) in enumerate(polar)),
+        )
+        for k, (vert, (_angle, radius, height)) in enumerate(zip(remaining, polar)):
+            target = phase + step * k
+            vert.co = center + normal * height + (u * math.cos(target) + v * math.sin(target)) * radius * scale
     return count, None
 
 
