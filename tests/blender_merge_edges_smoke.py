@@ -9,7 +9,7 @@ from pathlib import Path
 
 import bmesh
 import bpy
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +57,44 @@ def select_edges(obj, vert_pairs):
         assert edge is not None, (a, b)
         edge.select = True
     bm.select_flush_mode()
+    bmesh.update_edit_mesh(obj.data)
+
+
+def make_cylinders(name, cap_fill):
+    """z=-1.2~-0.2와 z=0.2~1.2에 놓인 닫힌 12각 원기둥 두 개를 한 메쉬로 만들고 Edit 모드(면 선택 모드)로 들어간다."""
+    if bpy.context.object is not None and bpy.context.object.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.ops.object.delete(use_global=False)
+    bm = bmesh.new()
+    for z in (-0.7, 0.7):
+        bmesh.ops.create_cone(
+            bm, cap_ends=True, cap_tris=(cap_fill == "TRIFAN"), segments=12,
+            radius1=1.0, radius2=1.0, depth=1.0, matrix=Matrix.Translation((0.0, 0.0, z)),
+        )
+    mesh = bpy.data.meshes.new(name)
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.context.tool_settings.mesh_select_mode = (False, False, True)
+    return obj
+
+
+def select_faces(obj, predicate, extra_edges=()):
+    """predicate가 참인 면만 선택한다. extra_edges(정점 인덱스 쌍)는 면과 별개로 추가 선택한다."""
+    bm = bmesh.from_edit_mesh(obj.data)
+    bm.verts.ensure_lookup_table()
+    for element in (*bm.verts, *bm.edges, *bm.faces):
+        element.select = False
+    for face in bm.faces:
+        if predicate(face):
+            face.select_set(True)
+    for a, b in extra_edges:
+        bm.edges.get((bm.verts[a], bm.verts[b])).select_set(True)
     bmesh.update_edit_mesh(obj.data)
 
 
@@ -158,6 +196,40 @@ def main() -> None:
         select_edges(obj, [])
         assert bpy.ops.mesh.cat_merge_edges() == {"CANCELLED"}
         assert coords(obj) == before
+
+        # 7) 면 선택: 닫힌 두 원기둥의 마주보는 뚜껑 면 → 면을 지우고 테두리를 정중앙에서 이어 한 관으로 만든다.
+        for cap_fill in ("NGON", "TRIFAN"):
+            obj = make_cylinders("Tubes", cap_fill)
+            select_faces(obj, lambda face: abs(face.calc_center_median().z) < 0.2 + 1e-4)
+            assert bpy.ops.mesh.cat_merge_edges() == {"FINISHED"}
+            bm = bmesh.from_edit_mesh(obj.data)
+            sides = [face for face in bm.faces if len(face.verts) == 4]
+            assert len(sides) == 24, (cap_fill, len(sides))
+            # 위아래 바깥 뚜껑만 남고, 정점은 링 세 개(바깥 둘 + 가운데 합친 링) + 부채꼴 중심.
+            centers = 2 if cap_fill == "TRIFAN" else 0
+            assert len(bm.verts) == 12 * 3 + centers, (cap_fill, len(bm.verts))
+            assert all(len(edge.link_faces) == 2 for edge in bm.edges), "이어 붙인 관에 열린 테두리가 남았습니다."
+            middle = [vert for vert in bm.verts if abs(vert.co.z) < 1e-5]
+            assert len(middle) == 12 and all(vert.select for vert in middle), "가운데 링이 z=0에서 선택되어야 합니다."
+            assert all(abs(vert.co.xy.length - 1.0) < 1e-5 for vert in middle)
+
+        # 8) 면 선택이지만 짝지을 수 없는 경우(테두리 정점 수가 다름, 붙어 있는 두 면, 면 + 떨어진 선)는 바꾸지 않는다.
+        obj = make_mesh(
+            "BadFaces",
+            [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (2, 0, 0), (3, 0, 0), (2.5, 1, 0), (2, 1, 0), (3, 1, 0),
+             (5, 0, 0), (5, 1, 0)],
+            faces=[(0, 1, 2, 3), (4, 5, 6), (1, 4, 7, 2)],
+            edges=[(9, 10)],
+        )
+        before = coords(obj)
+        select_faces(obj, lambda face: len(face.verts) == 3 or face.calc_center_median().x < 0.6)
+        assert bpy.ops.mesh.cat_merge_edges() == {"CANCELLED"}
+        select_faces(obj, lambda face: len(face.verts) == 4)
+        assert bpy.ops.mesh.cat_merge_edges() == {"CANCELLED"}
+        select_faces(obj, lambda face: face.calc_center_median().x < 0.6, extra_edges=[(9, 10)])
+        assert bpy.ops.mesh.cat_merge_edges() == {"CANCELLED"}
+        assert coords(obj) == before
+        assert len(bmesh.from_edit_mesh(obj.data).faces) == 3
         print("CatTools merge edges smoke: OK")
     finally:
         if registered_here:

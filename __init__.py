@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 18, 0),
+    "version": (1, 19, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -2868,8 +2868,15 @@ def merge_vert_pairs(bm, pairs) -> list:
     return kept
 
 
+def face_region_boundary(faces):
+    """선택한 면 영역의 테두리 선(영역 안쪽 면 하나에만 닿는 선) 목록."""
+    face_set = set(faces)
+    edges = {edge for face in faces for edge in face.edges}
+    return [edge for edge in edges if sum(1 for face in edge.link_faces if face in face_set) == 1]
+
+
 class MESH_OT_CatMergeEdges(Operator):
-    """마주보는 두 선(또는 같은 수의 선으로 된 두 선 줄·루프)을 정중앙의 한 선으로 합칩니다. Bridge Edge Loops 후 Collapse한 것과 같습니다."""
+    """마주보는 두 선(또는 같은 수의 선으로 된 두 선 줄·루프)을 정중앙의 한 선으로 합칩니다. Bridge Edge Loops 후 Collapse한 것과 같습니다. 마주보는 두 면을 선택하면 면을 지우고 두 면의 테두리를 정중앙에서 이어 붙입니다(닫힌 두 원기둥을 한 관으로 잇기 등)."""
     bl_idname = "mesh.cat_merge_edges"
     bl_label = "Merge Edges"
     bl_options = {'REGISTER', 'UNDO'}
@@ -2885,21 +2892,35 @@ class MESH_OT_CatMergeEdges(Operator):
             edges = [edge for edge in bm.edges if edge.select and not edge.hide]
             if not edges:
                 continue
-            chains = edge_chains(edges)
+            # 면을 선택했으면 그 면들은 지우고, 각 면 영역의 테두리 루프끼리 합친다.
+            faces = [face for face in bm.faces if face.select and not face.hide]
+            if faces:
+                face_edges = {edge for face in faces for edge in face.edges}
+                if any(edge not in face_edges for edge in edges):
+                    self.report({'WARNING'}, f"{obj.name}: 면과 따로 떨어진 선을 함께 선택하지 마세요.")
+                    return {'CANCELLED'}
+                edges = face_region_boundary(faces)
+            chains = edge_chains(edges) if edges else None
             pairs = pair_chain_verts(chains) if chains is not None else None
             if pairs is None:
-                self.report(
-                    {'WARNING'},
-                    f"{obj.name}: 선 수가 같은 선·선 줄·루프를 마주보는 쌍으로 선택하세요.",
-                )
+                if faces:
+                    message = f"{obj.name}: 테두리 정점 수가 같고 서로 떨어진 면(면 묶음)을 마주보는 쌍으로 선택하세요."
+                else:
+                    message = f"{obj.name}: 선 수가 같은 선·선 줄·루프를 마주보는 쌍으로 선택하세요."
+                self.report({'WARNING'}, message)
                 return {'CANCELLED'}
-            plans.append((obj, bm, pairs))
+            plans.append((obj, bm, pairs, faces))
         if not plans:
-            self.report({'WARNING'}, "합칠 두 선을 선택하세요.")
+            self.report({'WARNING'}, "합칠 두 선이나 두 면을 선택하세요.")
             return {'CANCELLED'}
 
         merged = 0
-        for obj, bm, pairs in plans:
+        removed = 0
+        for obj, bm, pairs, faces in plans:
+            if faces:
+                # 테두리 선·정점은 남기고 면과 영역 안쪽 선·정점(부채꼴 중심 등)만 지운다.
+                bmesh.ops.delete(bm, geom=faces, context='FACES_KEEP_BOUNDARY')
+                removed += len(faces)
             kept = set(merge_vert_pairs(bm, pairs))
             for vert in kept:
                 vert.select = True
@@ -2909,7 +2930,8 @@ class MESH_OT_CatMergeEdges(Operator):
             bm.select_flush_mode()
             bmesh.update_edit_mesh(obj.data)
             merged += len(pairs)
-        self.report({'INFO'}, f"정점 {merged}쌍을 정중앙으로 합쳤습니다.")
+        prefix = f"면 {removed}개를 지우고 " if removed else ""
+        self.report({'INFO'}, f"{prefix}정점 {merged}쌍을 정중앙으로 합쳤습니다.")
         return {'FINISHED'}
 
 
