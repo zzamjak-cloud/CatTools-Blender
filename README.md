@@ -23,6 +23,7 @@ CatTools는 CAT 블록 모델링 작업에 사용해 온 **Woody Tools**의 최�
 - Merge Edges: Edit 모드에서 서로 다른 면에 속해 마주보는 두 선을 선택하고 Edge의 Merge를 누르거나 Ctrl+Alt+E(Edit 모드 단축키)를 누르면, Bridge Edge Loops 후 Collapse한 것처럼 두 선이 정중앙의 한 선으로 합쳐짐(양쪽 면이 그 선을 공유). 선 수가 같은 선 줄·닫힌 루프(Edge Loop)끼리도 각 선을 마주보는 선과 짝지어 한 번에 합치며, 여러 쌍을 함께 선택하면 선 수가 같은 가장 가까운 묶음끼리 쌍을 맺어 모두 합치고, 꼭짓점 하나를 공유하는 V자 두 선은 벌어진 끝을 합쳐 틈을 닫음. 짝을 정할 수 없는 선택(짝 없이 남는 선 묶음, 선 수가 다름, 갈래가 있음)은 아무것도 바꾸지 않음. 선 대신 서로 떨어져 마주보는 두 면(또는 면 묶음)을 선택하면 선택한 면을 지우고 두 면의 테두리 루프를 정중앙에서 이어 붙임(예: 닫힌 두 원기둥의 마주보는 뚜껑을 선택해 하나의 관으로 연결, 삼각형 부채꼴 뚜껑의 중심 정점도 함께 정리). 테두리 정점 수가 다르거나 두 면이 붙어 있거나 면과 떨어진 선을 함께 선택하면 아무것도 바꾸지 않음
 - Bridge: Edit 모드에서 마주보는 두 면(또는 면 묶음)을 선택하고 Edge의 Bridge를 누르거나 Ctrl+Shift+E(Edit 모드 단축키)를 누르면 선택한 면을 지우고 두 테두리 사이를 사각형 면으로 관처럼 이음(선 수가 같은 두 선 줄·루프를 선택하면 면을 지우지 않고 그 사이를 이음). 짝은 양쪽 기존 면의 감김 방향이 맞물리고 두 테두리가 거울처럼 마주보는 정렬로 정해 다리가 꼬이지 않음. Adjust Last Operation 패널의 Subdivisions로 다리를 가로로 나누고, 나눈 정점은 양 끝 면의 노멀(선만 선택했으면 이어진 면의 흐름) 방향을 접선으로 쓰는 Bezier 곡선 위에 놓여 Set Flow처럼 매끄럽게 휨. Smoothness(기본 1)로 휘는 정도를 조절(0이면 고르게 나눈 직선). 두 기둥의 윗면을 이으면 아치가 만들어짐
 - Modeling Cylinder·Cube: Modeling 섹션의 Cylinder나 Cube를 누른 뒤 3D 뷰에서 마우스 아래 면(없으면 바닥 Z=0) 위를 클릭-드래그하면 그 면의 노멀을 축으로 바닥 원(중심→반지름) 또는 사각형(모서리→모서리, Shift로 정사각형)을 그림. 놓으면 놓은 지점에서 노멀 방향으로 높이가 마우스를 따라오고(음수면 면 안쪽), 다시 클릭하면 오브젝트를 만듦(바닥 중심이 원점, X축은 면의 첫 선 방향). 그리는 동안 화면 이동·확대가 되고 Esc·우클릭으로 취소. Adjust Last Operation 패널에서 실린더는 Radius·Height와 U(둘레)·V(높이) 해상도, 큐브는 Size X·Y·Height와 X·Y·Z 해상도를 조절
+- Isolate Rotate: 메쉬 오브젝트를 선택하고 Isolate의 Isolate Rotate를 누르면 Local View로 띄우고, 사이드바에 생긴 X·Y·Z 회전값을 입력하는 즉시 오브젝트 전체를 바운딩 박스 중심 기준으로 가상 회전시킴(A 포즈의 팔을 X축에 맞추는 등). 이 상태에서 Object·Edit 모드로 Global 축 기반 모델링을 하고 Exit Isolate를 누르면 진입 전 자세(matrix_basis)로 정확히 되돌아가며, 편집한 메쉬는 원래 자세에 그대로 맞음. 회전 중에는 Armature 모디파이어의 뷰포트 표시를 잠시 끄고 해제할 때 다시 켬. Isolate 중 파일을 저장·다시 열어도 Exit로 되돌릴 수 있음. 회전값을 직접 넣는 대신 Align X·Y·Z를 누르면 선택 방향을 그 축에 맞추는 회전값이 자동으로 들어감: Edit 모드에서 팔 둘레 엣지 루프(고리)를 고르면 고리의 노멀(팔 길이 방향), 길이 방향 선·두 정점을 고르면 선 방향, 같은 쪽을 보는 면(끝 뚜껑 등)을 고르면 면 노멀, Object 모드면 형상의 가장 긴 축을 씀. 진입 전 자세 기준으로 계산하므로 반복해 눌러도 결과가 같음
 - Tris to Quads: Edit 모드에서 면을 선택하고 Modeling의 Tris to Quads를 누르거나 Ctrl+Alt+J(Edit 모드 단축키)를 누르면, 선택한 면 중 이웃한 삼각형 두 개 사이의 대각선을 지워 사각형으로 만듦. 사각형·N각형이 섞여 있어도 삼각형만 골라 짝짓고, 짝 후보가 적은 삼각형부터 네 모서리가 직각에 가장 가까운 이웃과 짝지어 기본 Alt+J보다 남는 삼각형이 적음. 합친 사각형은 선택된 채로 남고 선택하지 않은 면과는 짝짓지 않음. Adjust Last Operation 패널의 Max Angle(두 삼각형이 접힌 각 한도, 기본 40°)과 Shape Limit(사각형 모서리가 직각에서 벗어나도 되는 한도, 기본 60°. 구 극점의 삼각형 부채꼴 등은 남김)로 조절
 - Align 축약 버튼: 활성 오브젝트를 기준으로 선택 오브젝트의 Loc·Rot·Sca를 X·Y·Z·All 축별 정렬
 - 기본 머티리얼 생성
@@ -150,6 +151,7 @@ N 키 사이드바 토글과 CatTools 탭 활성화를 확인하려면 창이 �
 ./scripts/dev_run.sh --background --python tests/blender_merge_edges_smoke.py
 ./scripts/dev_run.sh --background --python tests/blender_tris_to_quads_smoke.py
 ./scripts/dev_run.sh --background --python tests/blender_draw_primitive_smoke.py
+./scripts/dev_run.sh --background --python tests/blender_isolate_rotate_smoke.py
 ./scripts/dev_run.sh --enable-event-simulate --python tests/blender_draw_primitive_gui_smoke.py
 ./scripts/dev_run.sh --enable-event-simulate --python tests/blender_palette_gui_smoke.py
 ```

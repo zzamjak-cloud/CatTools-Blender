@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 21, 0),
+    "version": (1, 22, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -415,6 +415,22 @@ class OBJECT_PT_WoodyTool(Panel):
         operator = row.operator(VIEW3D_OT_CatDrawPrimitive.bl_idname, text="Cube", icon='MESH_CUBE')
         operator.shape = 'CUBE'
         layout.operator(MESH_OT_CatTrisToQuads.bl_idname, text="Tris to Quads (Ctrl+Alt+J)", icon='MESH_PLANE')
+
+        layout.separator(factor=1)
+
+    # 회전 Isolate: 오브젝트를 띄워 가상으로 돌린 채 X·Y·Z 축 기준으로 모델링하고, 해제하면 원래 자세로 돌아간다
+        layout.label(text="Isolate :", icon='HIDE_OFF')
+        if isolate_active(context.scene):
+            row = layout.row(align=True)
+            row.prop(context.scene, "cat_isolate_rotation", text="")
+            # 선택한 엣지 루프·선·면의 방향을 고른 축에 맞춘다.
+            row = layout.row(align=True)
+            row.label(text="Align")
+            for axis in ('X', 'Y', 'Z'):
+                row.operator(VIEW3D_OT_CatIsolateAlign.bl_idname, text=axis).axis = axis
+            layout.operator(VIEW3D_OT_CatIsolateExit.bl_idname, text="Exit Isolate", icon='LOOP_BACK')
+        else:
+            layout.operator(VIEW3D_OT_CatIsolateRotate.bl_idname, text="Isolate Rotate", icon='ORIENTATION_GIMBAL')
 
         layout.separator(factor=1)
 
@@ -3739,6 +3755,230 @@ class VIEW3D_OT_CatDrawPrimitive(Operator):
         gpu.state.blend_set('NONE')
 
 
+# 회전 Isolate: 오브젝트를 Local View로 띄우고 가상으로 돌려 X·Y·Z 축에 맞춘 채 모델링한다 ---------------
+# 회전은 오브젝트 변환에만 걸고 메쉬(로컬 좌표)는 그대로 두므로, 원래 변환으로 되돌리면 편집 내용이 원래 자세에 맞는다.
+
+# 오브젝트: Isolate 진입 시의 월드 행렬·matrix_basis(행 우선 16개 값), 잠시 끈 Armature 모디파이어 이름
+ISOLATE_WORLD_PROP = "cat_isolate_world"
+ISOLATE_BASIS_PROP = "cat_isolate_basis"
+ISOLATE_MODIFIERS_PROP = "cat_isolate_modifiers"
+# 씬: 가상 회전의 기준점(월드). 이 값이 있으면 Isolate 중이다.
+ISOLATE_PIVOT_PROP = "cat_isolate_pivot"
+
+
+def flatten_matrix(matrix: Matrix) -> list:
+    return [value for row in matrix for value in row]
+
+
+def unflatten_matrix(values) -> Matrix:
+    values = list(values)
+    return Matrix([values[0:4], values[4:8], values[8:12], values[12:16]])
+
+
+def isolate_active(scene) -> bool:
+    return ISOLATE_PIVOT_PROP in scene
+
+
+def isolated_objects(scene) -> list:
+    return [obj for obj in scene.objects if ISOLATE_WORLD_PROP in obj]
+
+
+def apply_isolate_rotation(scene) -> None:
+    """Isolate 중인 오브젝트를 진입 시 자세에서 기준점을 중심으로 가상 회전만큼 돌린다."""
+    if not isolate_active(scene):
+        return
+    pivot = Vector(scene[ISOLATE_PIVOT_PROP])
+    rotation = Euler(scene.cat_isolate_rotation).to_matrix().to_4x4()
+    turn = Matrix.Translation(pivot) @ rotation @ Matrix.Translation(-pivot)
+    for obj in isolated_objects(scene):
+        obj.matrix_world = turn @ unflatten_matrix(obj[ISOLATE_WORLD_PROP])
+
+
+def _update_isolate_rotation(scene, _context) -> None:
+    apply_isolate_rotation(scene)
+
+
+ISOLATE_SCENE_PROPERTIES = {
+    "cat_isolate_rotation": lambda: bpy.props.FloatVectorProperty(
+        name="Virtual Rotation",
+        description="Isolate 중인 오브젝트를 기준점 중심으로 가상 회전시킬 값(월드 축). Isolate를 해제하면 원래 자세로 돌아갑니다",
+        subtype='EULER', unit='ROTATION', size=3, update=_update_isolate_rotation,
+    ),
+}
+
+
+def view3d_window_override(context):
+    """사이드바 버튼에서 실행해도 Local View 전환이 3D 뷰 본 영역에서 일어나도록 하는 오버라이드 인자."""
+    area = context.area if context.area is not None and context.area.type == 'VIEW_3D' else None
+    if area is None:
+        return None
+    region = next((r for r in area.regions if r.type == 'WINDOW'), None)
+    if region is None:
+        return None
+    return {"area": area, "region": region}
+
+
+class VIEW3D_OT_CatIsolateRotate(Operator):
+    """선택한 메쉬 오브젝트를 Local View로 띄우고, 사이드바의 회전값만큼 가상으로 돌려 X·Y·Z 축 기준으로 모델링하게 합니다. A 포즈의 팔처럼 기울어진 부분을 축에 맞춰 놓고 작업한 뒤 Exit로 원래 자세로 돌아갑니다."""
+    bl_idname = "view3d.cat_isolate_rotate"
+    bl_label = "Isolate Rotate"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (
+            context.mode in {'OBJECT', 'EDIT_MESH'}
+            and not isolate_active(context.scene)
+            and any(obj.type == 'MESH' for obj in context.selected_objects)
+        )
+
+    def execute(self, context) -> Set[str]:
+        scene = context.scene
+        objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        # 기준점: 선택 오브젝트 전체의 월드 바운딩 박스 중심
+        corners = [obj.matrix_world @ Vector(corner) for obj in objects for corner in obj.bound_box]
+        low = Vector(tuple(min(c[i] for c in corners) for i in range(3)))
+        high = Vector(tuple(max(c[i] for c in corners) for i in range(3)))
+        for obj in objects:
+            obj[ISOLATE_WORLD_PROP] = flatten_matrix(obj.matrix_world)
+            obj[ISOLATE_BASIS_PROP] = flatten_matrix(obj.matrix_basis)
+            # 오브젝트를 돌리면 Armature 변형이 어긋나 보이므로, 켜져 있던 것만 잠시 끈다.
+            disabled = [m.name for m in obj.modifiers if m.type == 'ARMATURE' and m.show_viewport]
+            for name in disabled:
+                obj.modifiers[name].show_viewport = False
+            obj[ISOLATE_MODIFIERS_PROP] = disabled
+        scene[ISOLATE_PIVOT_PROP] = list((low + high) * 0.5)
+        scene.cat_isolate_rotation = (0.0, 0.0, 0.0)
+        override = view3d_window_override(context)
+        if override is not None and context.space_data.local_view is None:
+            with context.temp_override(**override):
+                bpy.ops.view3d.localview(frame_selected=True)
+        self.report({'INFO'}, f"오브젝트 {len(objects)}개를 Isolate했습니다. 사이드바에서 회전값을 입력해 축을 맞추세요.")
+        return {'FINISHED'}
+
+
+def principal_direction(points):
+    """
+    점들이 이루는 형태의 주 방향(단위 벡터). 점이 모자라면 None.
+
+    한 줄로 길게 늘어섰으면 그 줄 방향을, 고리처럼 평면에 퍼졌으면 그 평면의 노멀을 쓴다.
+    """
+    if len(points) < 2:
+        return None
+    if len(points) == 2:
+        direction = points[1] - points[0]
+        return direction.normalized() if direction.length > 1e-9 else None
+    coords = np.array([tuple(point) for point in points], dtype=float)
+    coords -= coords.mean(axis=0)
+    values, vectors = np.linalg.eigh(coords.T @ coords)
+    # eigh는 고윳값을 오름차순으로 돌려준다: values[2]가 가장 긴 축
+    if values[2] <= 1e-12:
+        return None
+    if values[1] < 0.1 * values[2]:
+        return Vector(vectors[:, 2]).normalized()
+    return Vector(vectors[:, 0]).normalized()
+
+
+def isolate_align_direction(context, objects):
+    """
+    Align 기준 방향(진입 전 자세의 월드 좌표). (방향 또는 None, 쓴 근거 설명)을 돌려준다.
+
+    Edit 모드면 선택한 면 노멀(같은 쪽을 볼 때) 또는 선택 정점의 주 방향을, Object 모드면 형상 전체의 가장 긴 축을 쓴다.
+    """
+    points = []
+    normal_sum = Vector()
+    area_sum = 0.0
+    edit = context.mode == 'EDIT_MESH'
+    for obj in objects:
+        original = unflatten_matrix(obj[ISOLATE_WORLD_PROP])
+        rotation = original.to_3x3()
+        normal_matrix = rotation.inverted_safe().transposed()
+        if edit and obj.mode == 'EDIT':
+            bm = bmesh.from_edit_mesh(obj.data)
+            points += [original @ vert.co for vert in bm.verts if vert.select and not vert.hide]
+            for face in bm.faces:
+                if face.select and not face.hide:
+                    area = face.calc_area()
+                    normal_sum += (normal_matrix @ face.normal).normalized() * area
+                    area_sum += area
+        elif not edit:
+            points += [original @ vert.co for vert in obj.data.vertices]
+    if edit and not points:
+        return None, "축에 맞출 선·면을 선택하세요."
+    # 같은 쪽을 보는 면(끝 뚜껑 등)을 골랐으면 면 노멀을, 아니면(둘레 전체 등) 형태의 주 방향을 쓴다.
+    if area_sum > 1e-12 and normal_sum.length > 0.7 * area_sum:
+        return normal_sum.normalized(), "선택 면 노멀"
+    direction = principal_direction(points)
+    if direction is None:
+        return None, "방향을 정할 수 없습니다. 선(두 정점 이상)이나 면을 선택하세요."
+    return direction, "선택 형태의 주 방향"
+
+
+class VIEW3D_OT_CatIsolateAlign(Operator):
+    """Isolate 중 선택한 엣지 루프(고리면 그 노멀)·선(선 방향)·면(노멀)의 방향이 고른 축과 나란해지도록 가상 회전값을 정합니다. Object 모드에서는 형상의 가장 긴 축을 맞춥니다."""
+    bl_idname = "view3d.cat_isolate_align"
+    bl_label = "Isolate Align"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    axis: EnumProperty(
+        name="Axis",
+        items=[('X', "X", "월드 X축에 맞춤"), ('Y', "Y", "월드 Y축에 맞춤"), ('Z', "Z", "월드 Z축에 맞춤")],
+        default='X',
+    ) # type: ignore
+
+    @classmethod
+    def poll(cls, context):
+        return isolate_active(context.scene) and context.mode in {'OBJECT', 'EDIT_MESH'}
+
+    def execute(self, context) -> Set[str]:
+        scene = context.scene
+        direction, reason = isolate_align_direction(context, isolated_objects(scene))
+        if direction is None:
+            self.report({'WARNING'}, reason)
+            return {'CANCELLED'}
+        target = Vector((0.0, 0.0, 0.0))
+        target['XYZ'.index(self.axis)] = 1.0
+        # 방향의 부호는 회전이 작아지는 쪽으로 고른다.
+        if direction.dot(target) < 0.0:
+            direction = -direction
+        scene.cat_isolate_rotation = direction.rotation_difference(target).to_euler('XYZ')
+        self.report({'INFO'}, f"{reason}을(를) {self.axis}축에 맞췄습니다.")
+        return {'FINISHED'}
+
+
+class VIEW3D_OT_CatIsolateExit(Operator):
+    """가상 회전을 풀고 오브젝트를 Isolate 진입 전 자세로 되돌린 뒤 Local View에서 나옵니다. Isolate 중 편집한 메쉬는 원래 자세 그대로 이어집니다."""
+    bl_idname = "view3d.cat_isolate_exit"
+    bl_label = "Exit Isolate"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return isolate_active(context.scene)
+
+    def execute(self, context) -> Set[str]:
+        scene = context.scene
+        objects = isolated_objects(scene)
+        for obj in objects:
+            obj.matrix_basis = unflatten_matrix(obj[ISOLATE_BASIS_PROP])
+            for name in obj.get(ISOLATE_MODIFIERS_PROP, []):
+                modifier = obj.modifiers.get(name)
+                if modifier is not None:
+                    modifier.show_viewport = True
+            for key in (ISOLATE_WORLD_PROP, ISOLATE_BASIS_PROP, ISOLATE_MODIFIERS_PROP):
+                if key in obj:
+                    del obj[key]
+        # 기준점을 먼저 지워 회전값을 0으로 돌려도 오브젝트가 다시 움직이지 않게 한다.
+        del scene[ISOLATE_PIVOT_PROP]
+        scene.cat_isolate_rotation = (0.0, 0.0, 0.0)
+        override = view3d_window_override(context)
+        if override is not None and context.space_data.local_view is not None:
+            with context.temp_override(**override):
+                bpy.ops.view3d.localview(frame_selected=False)
+        self.report({'INFO'}, f"오브젝트 {len(objects)}개를 원래 자세로 되돌렸습니다.")
+        return {'FINISHED'}
+
+
 # 컬러 팔레트 UV ------------------------------------------------------------------
 
 DEFAULT_PALETTE_PATH = "/Users/woody/dev/Godo_Project/Civilization_Merge/assets/ui/palette/palette.png"
@@ -4328,6 +4568,9 @@ classes = [
     MESH_OT_CatBridge,
     MESH_OT_CatTrisToQuads,
     VIEW3D_OT_CatDrawPrimitive,
+    VIEW3D_OT_CatIsolateRotate,
+    VIEW3D_OT_CatIsolateAlign,
+    VIEW3D_OT_CatIsolateExit,
     # OBJECT_PT_Spacing,
     # OBJECT_PT_Mirror_Modifier,
     # Add_Cylinder_6,
@@ -4355,7 +4598,7 @@ classes = [
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
-    for name, factory in EDIT_TRANSFORM_PROPERTIES.items():
+    for name, factory in {**EDIT_TRANSFORM_PROPERTIES, **ISOLATE_SCENE_PROPERTIES}.items():
         setattr(bpy.types.Scene, name, factory())
     for handlers in EDIT_RESET_HANDLERS:
         if _reset_edit_transform_state not in handlers:
@@ -4380,7 +4623,7 @@ def unregister():
     for handlers in EDIT_RESET_HANDLERS:
         if _reset_edit_transform_state in handlers:
             handlers.remove(_reset_edit_transform_state)
-    for name in EDIT_TRANSFORM_PROPERTIES:
+    for name in {**EDIT_TRANSFORM_PROPERTIES, **ISOLATE_SCENE_PROPERTIES}:
         if hasattr(bpy.types.Scene, name):
             delattr(bpy.types.Scene, name)
     for cls in classes:
