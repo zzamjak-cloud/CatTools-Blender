@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 20, 0),
+    "version": (1, 21, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -17,7 +17,8 @@ import numpy as np
 from typing import Set
 from bpy.types import AddonPreferences, Context, GizmoGroup, Panel, Operator, SpaceView3D
 from bpy.props import StringProperty, FloatProperty, FloatVectorProperty, BoolProperty, IntProperty, EnumProperty
-from mathutils import Euler, Matrix, Quaternion, Vector
+from bpy_extras import view3d_utils
+from mathutils import Euler, Matrix, Quaternion, Vector, geometry
 from mathutils.bvhtree import BVHTree
 from mathutils.geometry import tessellate_polygon
 from gpu_extras.batch import batch_for_shader
@@ -406,8 +407,13 @@ class OBJECT_PT_WoodyTool(Panel):
 
         layout.separator(factor=1)
 
-    # 폴리곤: 선택한 면에서 삼각형 두 개 사이의 대각선을 지워 사각형으로 만든다 (Edit 모드 전용)
-        layout.label(text="Polygon :", icon='FACESEL')
+    # 모델링: 면 위에 그려 실린더·큐브 만들기, 삼각형 두 개 사이의 대각선을 지워 사각형으로 만들기(Edit 모드 전용)
+        layout.label(text="Modeling :", icon='FACESEL')
+        row = layout.row(align=True)
+        operator = row.operator(VIEW3D_OT_CatDrawPrimitive.bl_idname, text="Cylinder", icon='MESH_CYLINDER')
+        operator.shape = 'CYLINDER'
+        operator = row.operator(VIEW3D_OT_CatDrawPrimitive.bl_idname, text="Cube", icon='MESH_CUBE')
+        operator.shape = 'CUBE'
         layout.operator(MESH_OT_CatTrisToQuads.bl_idname, text="Tris to Quads (Ctrl+Alt+J)", icon='MESH_PLANE')
 
         layout.separator(factor=1)
@@ -3333,6 +3339,406 @@ class MESH_OT_CatTrisToQuads(Operator):
         return {'FINISHED'}
 
 
+# 모델링: 마우스 아래 면 위에 바닥을 그리고 노멀 방향으로 높이를 정해 실린더·큐브를 만든다 -----------
+
+# 미리보기 선 색 (Blender 선택색 계열)
+PRIMITIVE_PREVIEW_COLOR = (1.0, 0.55, 0.1, 1.0)
+# 이 크기(뷰 거리 대비)보다 작게 그리고 놓으면 바닥을 그리지 않은 것으로 보고 다시 고르게 한다.
+PRIMITIVE_MIN_SIZE = 1e-3
+# 드래그·높이 조절 중에도 화면 이동·확대는 그대로 쓴다.
+PRIMITIVE_PASS_THROUGH = {
+    'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE', 'WHEELINMOUSE', 'WHEELOUTMOUSE',
+    'TRACKPADPAN', 'TRACKPADZOOM', 'MOUSEROTATE', 'MOUSESMARTZOOM',
+    'NDOF_MOTION', 'NDOF_BUTTON_FIT',
+}
+
+
+def plane_axis(normal: Vector, hint=None) -> Vector:
+    """normal에 수직인 X축: hint(면의 첫 선 방향)를 평면에 투영하고, 안 되면 월드 X·Y를 쓴다."""
+    for candidate in (hint, Vector((1.0, 0.0, 0.0)), Vector((0.0, 1.0, 0.0))):
+        if candidate is None:
+            continue
+        axis = candidate - normal * candidate.dot(normal)
+        if axis.length > 1e-6:
+            return axis.normalized()
+    return Vector((1.0, 0.0, 0.0))
+
+
+def frame_matrix(location: Vector, normal: Vector, axis: Vector) -> Matrix:
+    """X=axis, Z=normal, 원점=location인 월드 좌표계 행렬."""
+    y_axis = normal.cross(axis)
+    matrix = Matrix.Identity(4)
+    for row in range(3):
+        matrix[row][0], matrix[row][1], matrix[row][2], matrix[row][3] = (
+            axis[row], y_axis[row], normal[row], location[row]
+        )
+    return matrix
+
+
+def mouse_ray(region, rv3d, coord):
+    """화면 좌표에서 뷰를 지나는 광선 (시작점, 방향)."""
+    origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, coord)
+    direction = view3d_utils.region_2d_to_vector_3d(region, rv3d, coord)
+    return origin, direction
+
+
+def surface_frame_under_mouse(context, region, rv3d, coord):
+    """
+    마우스 아래 면의 좌표계(위치, 노멀=Z, 면의 첫 선을 따르는 X).
+
+    아무 면도 없으면 바닥(Z=0) 평면을 쓰고, 바닥과도 만나지 않으면 None을 돌려준다.
+    """
+    origin, direction = mouse_ray(region, rv3d, coord)
+    depsgraph = context.evaluated_depsgraph_get()
+    hit, location, normal, index, obj, matrix = context.scene.ray_cast(depsgraph, origin, direction)
+    if hit and normal.length > 1e-8:
+        normal = normal.normalized()
+        # 면 뒤쪽을 맞혔으면 보는 쪽을 향하도록 뒤집는다.
+        if normal.dot(direction) > 0.0:
+            normal = -normal
+        hint = None
+        evaluated = obj.evaluated_get(depsgraph)
+        mesh = evaluated.data if evaluated.type == 'MESH' else None
+        if mesh is not None and 0 <= index < len(mesh.polygons):
+            first, second = mesh.polygons[index].vertices[0], mesh.polygons[index].vertices[1]
+            hint = matrix @ mesh.vertices[second].co - matrix @ mesh.vertices[first].co
+        return frame_matrix(location, normal, plane_axis(normal, hint))
+    if abs(direction.z) < 1e-6:
+        return None
+    distance = -origin.z / direction.z
+    if distance < 0.0:
+        return None
+    return frame_matrix(origin + direction * distance, Vector((0.0, 0.0, 1.0)), Vector((1.0, 0.0, 0.0)))
+
+
+def build_cylinder_bmesh(radius: float, height: float, segments_u: int, segments_v: int):
+    """바닥 중심이 원점이고 +Z로 height만큼 선 실린더 (둘레 U, 높이 V 분할, 위아래 N각형 뚜껑)."""
+    bm = bmesh.new()
+    rings = []
+    for level in range(segments_v + 1):
+        z = height * level / segments_v
+        rings.append([
+            bm.verts.new((
+                radius * math.cos(2.0 * math.pi * index / segments_u),
+                radius * math.sin(2.0 * math.pi * index / segments_u),
+                z,
+            ))
+            for index in range(segments_u)
+        ])
+    for level in range(segments_v):
+        lower, upper = rings[level], rings[level + 1]
+        for index in range(segments_u):
+            following = (index + 1) % segments_u
+            bm.faces.new((lower[index], lower[following], upper[following], upper[index]))
+    bm.faces.new(list(reversed(rings[0])))
+    bm.faces.new(rings[-1])
+    return bm
+
+
+def build_box_bmesh(size_x: float, size_y: float, height: float, segments_x: int, segments_y: int, segments_z: int):
+    """바닥 중심이 원점이고 +Z로 height만큼 선 상자 (X·Y·Z 축마다 분할)."""
+    bm = bmesh.new()
+    half_x, half_y = size_x * 0.5, size_y * 0.5
+    span_x = Vector((size_x, 0.0, 0.0))
+    span_y = Vector((0.0, size_y, 0.0))
+    span_z = Vector((0.0, 0.0, height))
+
+    def grid(origin, du, dv, count_u, count_v):
+        # 한 옆면을 count_u x count_v 격자로 나눈다. 모서리 정점은 아래에서 합친다.
+        verts = [
+            [bm.verts.new(origin + du * (i / count_u) + dv * (j / count_v)) for i in range(count_u + 1)]
+            for j in range(count_v + 1)
+        ]
+        for j in range(count_v):
+            for i in range(count_u):
+                bm.faces.new((verts[j][i], verts[j][i + 1], verts[j + 1][i + 1], verts[j + 1][i]))
+
+    corner = Vector((-half_x, -half_y, 0.0))
+    grid(corner, span_x, span_y, segments_x, segments_y)
+    grid(corner + span_z, span_x, span_y, segments_x, segments_y)
+    grid(corner, span_x, span_z, segments_x, segments_z)
+    grid(corner + span_y, span_x, span_z, segments_x, segments_z)
+    grid(corner, span_y, span_z, segments_y, segments_z)
+    grid(corner + span_x, span_y, span_z, segments_y, segments_z)
+    scale = max(size_x, size_y, abs(height), 1e-6)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=scale * 1e-6)
+    return bm
+
+
+def primitive_preview_lines(shape: str, matrix: Matrix, radius: float, size_x: float, size_y: float,
+                            height: float, segments_u: int):
+    """미리보기 선분 끝점 목록(월드 좌표). 바닥·윗면 윤곽과 옆 기둥 선."""
+    if shape == 'CYLINDER':
+        count = max(segments_u, 3)
+        outline = [
+            Vector((radius * math.cos(2.0 * math.pi * i / count), radius * math.sin(2.0 * math.pi * i / count), 0.0))
+            for i in range(count)
+        ]
+        pillars = outline[:: max(count // 8, 1)]
+    else:
+        half_x, half_y = size_x * 0.5, size_y * 0.5
+        outline = [Vector((-half_x, -half_y, 0.0)), Vector((half_x, -half_y, 0.0)),
+                   Vector((half_x, half_y, 0.0)), Vector((-half_x, half_y, 0.0))]
+        pillars = outline
+    lift = Vector((0.0, 0.0, height))
+    lines = []
+    levels = (Vector(), lift) if abs(height) > 1e-9 else (Vector(),)
+    for offset in levels:
+        for index, point in enumerate(outline):
+            lines += [matrix @ (point + offset), matrix @ (outline[(index + 1) % len(outline)] + offset)]
+    if abs(height) > 1e-9:
+        for point in pillars:
+            lines += [matrix @ point, matrix @ (point + lift)]
+    return lines
+
+
+class VIEW3D_OT_CatDrawPrimitive(Operator):
+    """3D 뷰에서 마우스 아래 면 위에 드래그로 바닥(원·사각형)을 그리고, 놓은 뒤 마우스로 노멀 방향 높이를 정해 클릭하면 실린더·큐브 오브젝트를 만듭니다. Shift를 누르고 그리면 큐브 바닥이 정사각형이 됩니다. Esc·우클릭으로 취소합니다."""
+    bl_idname = "view3d.cat_draw_primitive"
+    bl_label = "Draw Primitive"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    shape: EnumProperty(
+        name="Shape",
+        items=[('CYLINDER', "Cylinder", "원기둥"), ('CUBE', "Cube", "상자")],
+        default='CYLINDER',
+        options={'HIDDEN'},
+    ) # type: ignore
+    # 바닥 중심의 월드 좌표계(X=면을 따르는 축, Z=노멀). 행 우선으로 펼쳐 저장한다.
+    base_matrix: FloatVectorProperty(
+        name="Base Matrix",
+        size=16,
+        default=tuple(value for row in Matrix.Identity(4) for value in row),
+        options={'HIDDEN'},
+    ) # type: ignore
+    radius: FloatProperty(name="Radius", subtype='DISTANCE', default=1.0, min=0.0) # type: ignore
+    size_x: FloatProperty(name="Size X", subtype='DISTANCE', default=2.0, min=0.0) # type: ignore
+    size_y: FloatProperty(name="Size Y", subtype='DISTANCE', default=2.0, min=0.0) # type: ignore
+    height: FloatProperty(
+        name="Height", description="노멀 방향 높이 (음수면 면 안쪽으로)", subtype='DISTANCE', default=2.0,
+    ) # type: ignore
+    resolution_u: IntProperty(name="U", description="둘레 분할 수", default=16, min=3, soft_max=64, max=256) # type: ignore
+    resolution_v: IntProperty(name="V", description="높이 분할 수", default=1, min=1, soft_max=32, max=256) # type: ignore
+    resolution_x: IntProperty(name="X", description="X 방향 분할 수", default=1, min=1, soft_max=32, max=128) # type: ignore
+    resolution_y: IntProperty(name="Y", description="Y 방향 분할 수", default=1, min=1, soft_max=32, max=128) # type: ignore
+    resolution_z: IntProperty(name="Z", description="높이 방향 분할 수", default=1, min=1, soft_max=32, max=128) # type: ignore
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode in {'OBJECT', 'EDIT_MESH'}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        if self.shape == 'CYLINDER':
+            layout.prop(self, "radius")
+            layout.prop(self, "height")
+            column = layout.column(align=True)
+            column.prop(self, "resolution_u", text="Resolution U")
+            column.prop(self, "resolution_v", text="V")
+        else:
+            column = layout.column(align=True)
+            column.prop(self, "size_x")
+            column.prop(self, "size_y", text="Y")
+            layout.prop(self, "height")
+            column = layout.column(align=True)
+            column.prop(self, "resolution_x", text="Resolution X")
+            column.prop(self, "resolution_y", text="Y")
+            column.prop(self, "resolution_z", text="Z")
+
+    def base(self) -> Matrix:
+        values = list(self.base_matrix)
+        return Matrix([values[0:4], values[4:8], values[8:12], values[12:16]])
+
+    def execute(self, context) -> Set[str]:
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        if self.shape == 'CYLINDER':
+            name = "Cylinder"
+            bm = build_cylinder_bmesh(self.radius, self.height, self.resolution_u, self.resolution_v)
+        else:
+            name = "Cube"
+            bm = build_box_bmesh(
+                self.size_x, self.size_y, self.height, self.resolution_x, self.resolution_y, self.resolution_z
+            )
+        # 음수 높이(면 안쪽으로 민 경우)에도 노멀이 바깥을 보도록 맞춘다.
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+        mesh = bpy.data.meshes.new(name)
+        bm.to_mesh(mesh)
+        bm.free()
+        obj = bpy.data.objects.new(name, mesh)
+        context.collection.objects.link(obj)
+        obj.matrix_world = self.base()
+        for other in context.view_layer.objects:
+            other.select_set(False)
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        return {'FINISHED'}
+
+    # 모달: HOVER(면 고르기) → BASE(바닥 드래그) → HEIGHT(높이 정하기) → 클릭으로 생성
+
+    def invoke(self, context, event) -> Set[str]:
+        if context.area is None or context.area.type != 'VIEW_3D':
+            self.report({'WARNING'}, "3D 뷰에서 실행하세요.")
+            return {'CANCELLED'}
+        windows = [r for r in context.area.regions if r.type == 'WINDOW']
+        if not windows:
+            return {'CANCELLED'}
+        # 사이드바 버튼으로 실행해도 3D 뷰 본 영역(Quad View면 가장 가까운 사분면)을 쓴다.
+        self._region = min(
+            windows,
+            key=lambda r: (
+                max(r.x - event.mouse_x, 0, event.mouse_x - (r.x + r.width))
+                + max(r.y - event.mouse_y, 0, event.mouse_y - (r.y + r.height))
+            ),
+        )
+        self._rv3d = self._region.data
+        self._area = context.area
+        self._stage = 'HOVER'
+        self._frame = None
+        self._hover = None
+        self._handle = SpaceView3D.draw_handler_add(self.draw_preview, (), 'WINDOW', 'POST_VIEW')
+        context.window_manager.modal_handler_add(self)
+        self.update_header()
+        self.update_hover(context, event)
+        return {'RUNNING_MODAL'}
+
+    def update_header(self) -> None:
+        shape = "원" if self.shape == 'CYLINDER' else "사각형"
+        texts = {
+            'HOVER': f"면 위에서 클릭-드래그해 바닥 {shape}을 그리세요 · Esc/우클릭 취소",
+            'BASE': f"드래그해 바닥 {shape} 크기 정하기{' (Shift: 정사각형)' if self.shape == 'CUBE' else ''} · 놓으면 높이 정하기",
+            'HEIGHT': "마우스로 노멀 방향 높이를 정하고 클릭해 만들기 · Esc/우클릭 취소",
+        }
+        self._area.header_text_set(texts[self._stage])
+
+    def coord(self, event):
+        return (event.mouse_x - self._region.x, event.mouse_y - self._region.y)
+
+    def update_hover(self, context, event) -> None:
+        self._hover = surface_frame_under_mouse(context, self._region, self._rv3d, self.coord(event))
+
+    def update_base(self, event) -> None:
+        # 마우스 광선이 바닥 평면과 만나는 점을 바닥 좌표계로 바꿔 크기를 정한다.
+        origin, direction = mouse_ray(self._region, self._rv3d, self.coord(event))
+        frame = self._frame
+        point = geometry.intersect_line_plane(origin, origin + direction, frame.translation, frame.col[2].xyz)
+        if point is None:
+            return
+        self._anchor = point
+        local = frame.inverted() @ point
+        if self.shape == 'CYLINDER':
+            self.radius = local.xy.length
+            self.base_matrix = [value for row in frame for value in row]
+            return
+        dx, dy = local.x, local.y
+        if event.shift:
+            side = max(abs(dx), abs(dy))
+            dx = math.copysign(side, dx)
+            dy = math.copysign(side, dy)
+        self.size_x, self.size_y = abs(dx), abs(dy)
+        # 큐브는 누른 점을 한 모서리로, 바닥 중심을 오브젝트 원점으로 둔다.
+        center = frame @ Vector((dx * 0.5, dy * 0.5, 0.0))
+        matrix = frame.copy()
+        matrix.translation = center
+        self.base_matrix = [value for row in matrix for value in row]
+
+    def update_height(self, event) -> None:
+        # 바닥을 놓은 지점에서 노멀 방향으로 뻗은 선과 마우스 광선이 가장 가까운 점의 높이를 쓴다.
+        # (놓은 곳에서 그대로 끌어 올리면 커서가 윤곽을 따라간다.)
+        origin, direction = mouse_ray(self._region, self._rv3d, self.coord(event))
+        anchor, normal = self._anchor, self._frame.col[2].xyz
+        closest = geometry.intersect_line_line(anchor, anchor + normal, origin, origin + direction)
+        if closest is not None:
+            self.height = (closest[0] - anchor).dot(normal)
+
+    def base_size(self) -> float:
+        return self.radius if self.shape == 'CYLINDER' else min(self.size_x, self.size_y)
+
+    def finish(self, context) -> None:
+        if self._handle is not None:
+            SpaceView3D.draw_handler_remove(self._handle, 'WINDOW')
+            self._handle = None
+        self._area.header_text_set(None)
+        self._area.tag_redraw()
+
+    def cancel(self, context) -> None:
+        # 파일 로드·창 닫기 등으로 Blender가 모달을 강제로 끝낼 때도 미리보기를 지운다.
+        self.finish(context)
+
+    def modal(self, context, event) -> Set[str]:
+        try:
+            return self.handle_event(context, event)
+        except Exception:
+            self.finish(context)
+            raise
+
+    def handle_event(self, context, event) -> Set[str]:
+        if event.type in PRIMITIVE_PASS_THROUGH:
+            return {'PASS_THROUGH'}
+        if event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
+            self.finish(context)
+            return {'CANCELLED'}
+        if event.type in {'MOUSEMOVE', 'LEFT_SHIFT', 'RIGHT_SHIFT'}:
+            if self._stage == 'HOVER':
+                self.update_hover(context, event)
+            elif self._stage == 'BASE':
+                self.update_base(event)
+            else:
+                self.update_height(event)
+        elif event.type == 'LEFTMOUSE':
+            if self._stage == 'HOVER' and event.value == 'PRESS':
+                self.update_hover(context, event)
+                if self._hover is not None:
+                    self._frame = self._hover
+                    self._anchor = self._frame.translation.copy()
+                    self.radius = self.size_x = self.size_y = self.height = 0.0
+                    self.base_matrix = [value for row in self._frame for value in row]
+                    self._stage = 'BASE'
+            elif self._stage == 'BASE' and event.value == 'RELEASE':
+                self.update_base(event)
+                scale = max(self._rv3d.view_distance, 1e-3)
+                if self.base_size() < scale * PRIMITIVE_MIN_SIZE:
+                    # 드래그 없이 클릭만 했으면 다시 면을 고른다.
+                    self._stage = 'HOVER'
+                else:
+                    self._stage = 'HEIGHT'
+                    self.update_height(event)
+            elif self._stage == 'HEIGHT' and event.value == 'PRESS':
+                self.update_height(event)
+                self.finish(context)
+                if abs(self.height) < 1e-6:
+                    self.report({'WARNING'}, "높이가 0이라 만들지 않았습니다.")
+                    return {'CANCELLED'}
+                return self.execute(context)
+            self.update_header()
+        self._area.tag_redraw()
+        return {'RUNNING_MODAL'}
+
+    def draw_preview(self) -> None:
+        if self._stage == 'HOVER':
+            if self._hover is None:
+                return
+            # 마우스 아래 면에 작은 원(사각형)과 노멀 선을 그려 그릴 평면을 보여 준다.
+            size = max(self._rv3d.view_distance, 1e-3) * 0.04
+            lines = primitive_preview_lines(self.shape, self._hover, size, size * 2.0, size * 2.0, size * 2.0, 16)
+        else:
+            lines = primitive_preview_lines(
+                self.shape, self.base(), self.radius, self.size_x, self.size_y, self.height, self.resolution_u
+            )
+        if not lines:
+            return
+        shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+        batch = batch_for_shader(shader, 'LINES', {"pos": [tuple(point) for point in lines]})
+        gpu.state.line_width_set(2.0)
+        gpu.state.blend_set('ALPHA')
+        shader.uniform_float("color", PRIMITIVE_PREVIEW_COLOR)
+        batch.draw(shader)
+        gpu.state.line_width_set(1.0)
+        gpu.state.blend_set('NONE')
+
+
 # 컬러 팔레트 UV ------------------------------------------------------------------
 
 DEFAULT_PALETTE_PATH = "/Users/woody/dev/Godo_Project/Civilization_Merge/assets/ui/palette/palette.png"
@@ -3921,6 +4327,7 @@ classes = [
     MESH_OT_CatMergeEdges,
     MESH_OT_CatBridge,
     MESH_OT_CatTrisToQuads,
+    VIEW3D_OT_CatDrawPrimitive,
     # OBJECT_PT_Spacing,
     # OBJECT_PT_Mirror_Modifier,
     # Add_Cylinder_6,
