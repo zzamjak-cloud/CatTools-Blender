@@ -102,6 +102,127 @@ def coords(obj):
     return sorted(tuple(round(c, 5) for c in vert.co) for vert in bmesh.from_edit_mesh(obj.data).verts)
 
 
+def make_pillars(name):
+    """
+    x=±1.5에 놓인 두 상자를 만든다. Y 방향 선을 한 번씩 잘라 마주보는 옆면이 면 두 개(테두리 정점 6개)로 나뉜다.
+    """
+    if bpy.context.object is not None and bpy.context.object.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.ops.object.delete(use_global=False)
+    bm = bmesh.new()
+    for x in (-1.5, 1.5):
+        result = bmesh.ops.create_cube(bm, size=1.0, matrix=Matrix.Translation((x, 0.0, 0.0)))
+        cube_edges = {edge for vert in result["verts"] for edge in vert.link_edges}
+        along_y = [edge for edge in cube_edges if abs((edge.verts[0].co - edge.verts[1].co).y) > 0.5]
+        bmesh.ops.subdivide_edges(bm, edges=along_y, cuts=1, use_grid_fill=True)
+    mesh = bpy.data.meshes.new(name)
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.context.tool_settings.mesh_select_mode = (False, False, True)
+    return obj
+
+
+def normals_consistent(bm) -> bool:
+    """두 면이 공유하는 모든 선을 두 면이 서로 반대 방향으로 지나면 노멀이 일관된다."""
+    for edge in bm.edges:
+        if len(edge.link_loops) == 2:
+            first, second = edge.link_loops
+            if first.vert is second.vert:
+                return False
+    return True
+
+
+def signed_volume(bm) -> float:
+    return sum(
+        loop_tri[0].vert.co.dot(loop_tri[1].vert.co.cross(loop_tri[2].vert.co)) / 6.0
+        for loop_tri in bm.calc_loop_triangles()
+    )
+
+
+def check_bridge(module) -> None:
+    """Bridge: 마주보는 면 묶음을 지우고 두 테두리 사이를 관처럼 잇는다. 선 줄 선택도 잇는다."""
+    item = next(item for _keymap, item in module.addon_keymaps if item.idname == "mesh.cat_bridge")
+    assert (item.type, item.ctrl, item.alt, item.shift) == ("E", True, False, True)
+
+    # 1) 두 상자의 마주보는 옆면(면 2개씩) → 면 4개를 지우고 테두리 정점 6개끼리 사각형 6개로 잇는다.
+    obj = make_pillars("Pillars")
+    bm = bmesh.from_edit_mesh(obj.data)
+    face_count = len(bm.faces)
+    select_faces(obj, lambda face: abs(abs(face.calc_center_median().x) - 1.0) < 1e-4)
+    assert sum(1 for face in bm.faces if face.select) == 4
+    assert bpy.ops.mesh.cat_bridge() == {"FINISHED"}
+    bm = bmesh.from_edit_mesh(obj.data)
+    assert len(bm.faces) == face_count - 4 + 6, len(bm.faces)
+    bridged = [face for face in bm.faces if face.select]
+    assert len(bridged) == 6 and all(len(face.verts) == 4 for face in bridged)
+    # 다리 면은 x=-1~1을 가로지르며 비틀리지 않는다(각 면이 x축 방향으로 길이 2인 선 두 개를 가진다).
+    for face in bridged:
+        spans = sorted(abs((edge.verts[0].co - edge.verts[1].co).x) for edge in face.edges)
+        assert abs(spans[-1] - 2.0) < 1e-5 and abs(spans[-2] - 2.0) < 1e-5, spans
+    assert all(len(edge.link_faces) == 2 for edge in bm.edges), "이은 메쉬에 열린 테두리가 남았습니다."
+    assert normals_consistent(bm), "다리 면의 노멀 방향이 기존 면과 어긋납니다."
+    assert signed_volume(bm) > 0.0, "노멀이 안쪽을 향합니다."
+
+    # 2) 선 선택: 마주보는 두 선 줄(선 4개씩) 사이를 사각형 4개로 잇고, 면은 지우지 않는다.
+    verts, faces = [], []
+    for x0 in (0.0, 2.0):
+        base = len(verts)
+        verts += [(x0 + dx, y, 0) for y in range(5) for dx in (0, 1)]
+        faces += [(base + 2 * y, base + 2 * y + 1, base + 2 * y + 3, base + 2 * y + 2) for y in range(4)]
+    obj = make_mesh("BridgeRows", verts, faces=faces)
+    select_edges(obj, [(2 * y + 1, 2 * y + 3) for y in range(4)] + [(10 + 2 * y, 10 + 2 * y + 2) for y in range(4)])
+    assert bpy.ops.mesh.cat_bridge() == {"FINISHED"}
+    bm = bmesh.from_edit_mesh(obj.data)
+    assert len(bm.faces) == 8 + 4 and len(bm.verts) == 20, (len(bm.faces), len(bm.verts))
+    assert normals_consistent(bm)
+    assert all(face.normal.z > 0.99 for face in bm.faces), "다리 면이 기존 면과 같은 쪽을 보아야 합니다."
+
+    # 3) 선 수가 다른 두 줄은 잇지 않는다.
+    select_edges(obj, [(0, 2), (12, 14), (14, 16)])
+    assert bpy.ops.mesh.cat_bridge() == {"CANCELLED"}
+
+    # 4) Subdivisions: 마주보는 옆면 다리를 4칸으로 나눈다. Smoothness 0이면 고르게 나눈 직선이다.
+    obj = make_pillars("Cuts")
+    bm = bmesh.from_edit_mesh(obj.data)
+    face_count, vert_count = len(bm.faces), len(bm.verts)
+    select_faces(obj, lambda face: abs(abs(face.calc_center_median().x) - 1.0) < 1e-4)
+    assert bpy.ops.mesh.cat_bridge(cuts=3, smoothness=0.0) == {"FINISHED"}
+    bm = bmesh.from_edit_mesh(obj.data)
+    assert len(bm.faces) == face_count - 4 + 6 * 4, len(bm.faces)
+    assert len(bm.verts) == vert_count + 6 * 3, len(bm.verts)
+    inner_x = sorted({round(vert.co.x, 5) for vert in bm.verts if abs(vert.co.x) < 0.99})
+    assert inner_x == [-0.5, 0.0, 0.5], inner_x
+    assert all(len(edge.link_faces) == 2 for edge in bm.edges) and normals_consistent(bm)
+
+    # 5) 아치: 두 기둥의 윗면(노멀 +Z)을 이으면 다리가 노멀을 따라 위로 솟았다 내려오는 아치가 된다.
+    obj = make_pillars("Arch")
+    select_faces(obj, lambda face: face.normal.z > 0.99)
+    assert bpy.ops.mesh.cat_bridge(cuts=9) == {"FINISHED"}
+    bm = bmesh.from_edit_mesh(obj.data)
+    assert all(len(edge.link_faces) == 2 for edge in bm.edges), "아치에 열린 테두리가 남았습니다."
+    assert normals_consistent(bm) and signed_volume(bm) > 0.0
+    top = max(vert.co.z for vert in bm.verts)
+    assert 1.0 < top < 2.5, top
+    # 아치 꼭대기는 가운데(x=0)에 있고 좌우 대칭이다.
+    peak = [vert for vert in bm.verts if abs(vert.co.z - top) < 1e-5]
+    assert all(abs(vert.co.x) < 1e-5 for vert in peak), [tuple(vert.co) for vert in peak]
+
+    # 6) 선 선택 분할: 이어진 면의 흐름(바깥 방향)을 따르므로 같은 평면 위 두 줄은 평면 안에서 나뉜다.
+    obj = make_mesh("BridgeRowCuts", verts, faces=faces)
+    select_edges(obj, [(2 * y + 1, 2 * y + 3) for y in range(4)] + [(10 + 2 * y, 10 + 2 * y + 2) for y in range(4)])
+    assert bpy.ops.mesh.cat_bridge(cuts=1) == {"FINISHED"}
+    bm = bmesh.from_edit_mesh(obj.data)
+    assert len(bm.faces) == 8 + 4 * 2 and len(bm.verts) == 20 + 5, (len(bm.faces), len(bm.verts))
+    assert all(abs(vert.co.z) < 1e-6 for vert in bm.verts)
+    assert all(abs(vert.co.x - 1.5) < 1e-5 for vert in bm.verts if 1.0 < vert.co.x < 2.0)
+
+
 def main() -> None:
     module, registered_here = load_addon()
     try:
@@ -230,6 +351,10 @@ def main() -> None:
         assert bpy.ops.mesh.cat_merge_edges() == {"CANCELLED"}
         assert coords(obj) == before
         assert len(bmesh.from_edit_mesh(obj.data).faces) == 3
+        assert bpy.ops.mesh.cat_bridge() == {"CANCELLED"}
+        assert coords(obj) == before
+
+        check_bridge(module)
         print("CatTools merge edges smoke: OK")
     finally:
         if registered_here:

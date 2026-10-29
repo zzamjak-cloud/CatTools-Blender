@@ -43,6 +43,7 @@ EXPECTED_REGISTERED_CLASSES = [
     "OBJECT_OT_CatSelectHiddenFaces",
     "MESH_OT_CatPaletteColor",
     "MESH_OT_CatMergeEdges",
+    "MESH_OT_CatBridge",
     "MESH_OT_CatTrisToQuads",
     "CircleArray",
     "Add_Material",
@@ -143,7 +144,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], "1.0.0")
         self.assertEqual(manifest["id"], "cat_tools")
         self.assertEqual(manifest["name"], "CatTools")
-        self.assertEqual(manifest["version"], "1.19.0")
+        self.assertEqual(manifest["version"], "1.20.0")
         self.assertEqual(manifest["blender_version_min"], "4.2.0")
         self.assertIn("SPDX:GPL-3.0-or-later", manifest["license"])
 
@@ -156,7 +157,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         info = ast.literal_eval(info_node.value)
         self.assertEqual(info["name"], "CatTools")
-        self.assertEqual(info["version"], (1, 19, 0))
+        self.assertEqual(info["version"], (1, 20, 0))
         self.assertEqual(info["blender"], (4, 2, 0))
 
     def test_registered_class_order(self) -> None:
@@ -480,6 +481,20 @@ class CatToolsSmokeTest(unittest.TestCase):
         source = MERGE_EDGES_SMOKE_PATH.read_text(encoding="utf-8")
         compile(source, str(MERGE_EDGES_SMOKE_PATH), "exec")
         self.assertIn("bpy.ops.mesh.cat_merge_edges(", source)
+
+    def test_bridge_button_and_shortcut(self) -> None:
+        panel = self.classes["OBJECT_PT_WoodyTool"]
+        draw = next(
+            node
+            for node in panel.body
+            if isinstance(node, ast.FunctionDef) and node.name == "draw"
+        )
+        self.assertIn("MESH_OT_CatBridge.bl_idname, text='Bridge (Ctrl+Shift+E)'", ast.unparse(draw))
+        self.assertIn(
+            "keymap_items.new(MESH_OT_CatBridge.bl_idname, 'E', 'PRESS', ctrl=True, shift=True)",
+            self.source,
+        )
+        self.assertIn("bpy.ops.mesh.cat_bridge(", MERGE_EDGES_SMOKE_PATH.read_text(encoding="utf-8"))
 
     def test_tris_to_quads_button_and_shortcut(self) -> None:
         panel = self.classes["OBJECT_PT_WoodyTool"]

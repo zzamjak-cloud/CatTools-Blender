@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 19, 0),
+    "version": (1, 20, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -401,6 +401,8 @@ class OBJECT_PT_WoodyTool(Panel):
     # 선: 마주보는 두 선을 정중앙의 한 선으로 합친다 (Edit 모드 전용)
         layout.label(text="Edge :", icon='EDGESEL')
         layout.operator(MESH_OT_CatMergeEdges.bl_idname, text="Merge (Ctrl+Alt+E)", icon='AUTOMERGE_ON')
+        # 마주보는 두 선 줄·루프(또는 두 면) 사이를 면으로 잇는다.
+        layout.operator(MESH_OT_CatBridge.bl_idname, text="Bridge (Ctrl+Shift+E)", icon='MOD_SKIN')
 
         layout.separator(factor=1)
 
@@ -2810,7 +2812,7 @@ def chain_distance(first, second) -> float:
     return sum((a.co - b.co).length_squared for a, b in zip(first, second))
 
 
-def pair_chain_verts(chains):
+def pair_chain_verts(chains, windings=None):
     """선 묶음의 정점을 마주보는 짝으로 묶는다. 합칠 수 없는 구성이면 None."""
     if len(chains) == 1:
         # 꼭짓점 하나를 공유하는 V자 선은 가운데 정점을 기준으로 접어 양 끝을 짝짓는다.
@@ -2819,32 +2821,49 @@ def pair_chain_verts(chains):
             return None
         half = len(verts) // 2
         return [(verts[index], verts[-1 - index]) for index in range(half)]
-    if len(chains) % 2:
+    groups = pair_chain_groups(chains, windings)
+    return None if groups is None else [pair for chain_pairs, _closed in groups for pair in chain_pairs]
+
+
+def pair_chain_groups(chains, windings=None):
+    """
+    선 수가 같은 선 묶음끼리 가장 가까운 짝부터 맺는다.
+
+    묶음 쌍마다 (선 순서대로 늘어선 정점 짝 목록, 닫힘 여부)를 돌려주며, 짝 없이 남는 묶음이 있으면 None.
+    windings(chain_winding 결과)가 있으면 기존 면의 감김 방향이 맞물리는 방향으로만 짝짓는다.
+    """
+    windings = windings or [None] * len(chains)
+    if len(chains) < 2 or len(chains) % 2:
         return None
-    # 선 수가 같은 묶음끼리 가장 가까운 짝부터 맺어, 여러 쌍의 선·선 줄·루프를 한 번에 합친다.
+    # 선 수가 같은 묶음끼리 가장 가까운 짝부터 맺어, 여러 쌍의 선·선 줄·루프를 한 번에 처리한다.
     matches = []
     for i, first in enumerate(chains):
         for j in range(i + 1, len(chains)):
-            match = align_chains(first, chains[j])
+            match = align_chains(first, chains[j], windings[i], windings[j])
             if match is not None:
                 matches.append((match[0], i, j, match[1]))
     matches.sort(key=lambda match: match[0])
     used = set()
-    pairs = []
+    groups = []
     for _distance, i, j, chain_pairs in matches:
         if i in used or j in used:
             continue
         used.update((i, j))
-        pairs.extend(chain_pairs)
-    return pairs if len(used) == len(chains) else None
+        groups.append((chain_pairs, chains[i][1]))
+    return groups if len(used) == len(chains) else None
 
 
-def align_chains(first_chain, second_chain):
+def align_chains(first_chain, second_chain, first_winding=None, second_winding=None):
     """두 선 묶음을 가장 가깝게 맞춘 (거리, 정점 짝)을 돌려준다. 선 수나 닫힘이 다르면 None."""
     (first, first_closed), (second, second_closed) = first_chain, second_chain
     if len(first) != len(second) or first_closed != second_closed:
         return None
-    candidates = [second, second[::-1]]
+    directions = [(second, 1), (second[::-1], -1)]
+    if first_winding and second_winding:
+        # 두 테두리에 남는 면이 서로 반대 방향으로 감겨야 이은 면이 꼬이지 않고 노멀이 일관된다.
+        # (예: 두 기둥 윗면을 아치로 이을 때 안쪽은 안쪽끼리, 바깥은 바깥끼리 짝짓는다.)
+        directions = [(sequence, sign) for sequence, sign in directions if first_winding * second_winding * sign == -1]
+    candidates = [sequence for sequence, _sign in directions]
     if first_closed:
         # 닫힌 루프는 시작점과 방향을 모두 바꿔 가며 가장 가까운 정렬을 고른다.
         candidates = [
@@ -2852,7 +2871,25 @@ def align_chains(first_chain, second_chain):
             for sequence in candidates
             for offset in range(len(sequence))
         ]
-    best = min(candidates, key=lambda sequence: chain_distance(first, sequence))
+    # 정렬은 두 묶음 중심을 잇는 선의 수직 이등분 평면에 둘째 묶음을 비춰 비교한다.
+    # 마주보는 뚜껑은 그대로, 나란히 놓인 윗면(아치)은 거울 대칭으로 짝지어 다리가 비틀리지 않는다.
+    first_center = sum((vert.co for vert in first), Vector()) / len(first)
+    second_center = sum((vert.co for vert in second), Vector()) / len(second)
+    axis = second_center - first_center
+    if axis.length > 1e-8:
+        axis.normalize()
+        middle = (first_center + second_center) * 0.5
+
+        def mirrored_distance(sequence) -> float:
+            return sum(
+                (a.co - (b.co - axis * (2.0 * (b.co - middle).dot(axis)))).length_squared
+                for a, b in zip(first, sequence)
+            )
+
+        best = min(candidates, key=mirrored_distance)
+    else:
+        best = min(candidates, key=lambda sequence: chain_distance(first, sequence))
+    # 어느 묶음끼리 짝지을지는 실제 거리로 정한다.
     return chain_distance(first, best), list(zip(first, best))
 
 
@@ -2875,6 +2912,50 @@ def face_region_boundary(faces):
     return [edge for edge in edges if sum(1 for face in edge.link_faces if face in face_set) == 1]
 
 
+def chain_winding(bm, verts, faces) -> int:
+    """
+    선 묶음 첫 선을 남는 면이 지나는 방향: 정점 순서대로면 1, 반대면 -1, 알 수 없으면 0.
+
+    면을 선택했으면 지울 면의 반대 방향을, 선만 선택했으면 그 선에 닿은 면이 하나뿐일 때 그 면의 방향을 쓴다.
+    """
+    edge = bm.edges.get((verts[0], verts[1]))
+    if edge is None:
+        return 0
+    face_set = set(faces)
+    if faces:
+        loops = [loop for loop in edge.link_loops if loop.face in face_set]
+        sign = -1
+    else:
+        loops = list(edge.link_loops)
+        sign = 1
+    if len(loops) != 1:
+        return 0
+    return sign if loops[0].vert is verts[0] else -sign
+
+
+def selected_edge_chains(bm):
+    """
+    선택을 선 묶음으로 만든다. 면을 선택했으면 면 영역의 테두리 선을 쓴다.
+
+    (선 묶음 또는 None, 선택한 면 목록, 오류 문구 또는 None, 묶음별 감김 방향)을 돌려준다.
+    선택한 선이 없으면 선 묶음이 빈 목록이다.
+    """
+    edges = [edge for edge in bm.edges if edge.select and not edge.hide]
+    if not edges:
+        return [], [], None, None
+    faces = [face for face in bm.faces if face.select and not face.hide]
+    if faces:
+        face_edges = {edge for face in faces for edge in face.edges}
+        if any(edge not in face_edges for edge in edges):
+            return None, faces, "면과 따로 떨어진 선을 함께 선택하지 마세요.", None
+        edges = face_region_boundary(faces)
+        if not edges:
+            return None, faces, "테두리가 있는 면을 선택하세요.", None
+    chains = edge_chains(edges)
+    windings = [chain_winding(bm, verts, faces) for verts, _closed in chains] if chains else None
+    return chains, faces, None, windings
+
+
 class MESH_OT_CatMergeEdges(Operator):
     """마주보는 두 선(또는 같은 수의 선으로 된 두 선 줄·루프)을 정중앙의 한 선으로 합칩니다. Bridge Edge Loops 후 Collapse한 것과 같습니다. 마주보는 두 면을 선택하면 면을 지우고 두 면의 테두리를 정중앙에서 이어 붙입니다(닫힌 두 원기둥을 한 관으로 잇기 등)."""
     bl_idname = "mesh.cat_merge_edges"
@@ -2889,19 +2970,14 @@ class MESH_OT_CatMergeEdges(Operator):
         plans = []
         for obj in edit_mesh_objects(context):
             bm = bmesh.from_edit_mesh(obj.data)
-            edges = [edge for edge in bm.edges if edge.select and not edge.hide]
-            if not edges:
-                continue
             # 면을 선택했으면 그 면들은 지우고, 각 면 영역의 테두리 루프끼리 합친다.
-            faces = [face for face in bm.faces if face.select and not face.hide]
-            if faces:
-                face_edges = {edge for face in faces for edge in face.edges}
-                if any(edge not in face_edges for edge in edges):
-                    self.report({'WARNING'}, f"{obj.name}: 면과 따로 떨어진 선을 함께 선택하지 마세요.")
-                    return {'CANCELLED'}
-                edges = face_region_boundary(faces)
-            chains = edge_chains(edges) if edges else None
-            pairs = pair_chain_verts(chains) if chains is not None else None
+            chains, faces, error, windings = selected_edge_chains(bm)
+            if error is not None:
+                self.report({'WARNING'}, f"{obj.name}: {error}")
+                return {'CANCELLED'}
+            if chains == []:
+                continue
+            pairs = pair_chain_verts(chains, windings) if chains is not None else None
             if pairs is None:
                 if faces:
                     message = f"{obj.name}: 테두리 정점 수가 같고 서로 떨어진 면(면 묶음)을 마주보는 쌍으로 선택하세요."
@@ -2932,6 +3008,173 @@ class MESH_OT_CatMergeEdges(Operator):
             merged += len(pairs)
         prefix = f"면 {removed}개를 지우고 " if removed else ""
         self.report({'INFO'}, f"{prefix}정점 {merged}쌍을 정중앙으로 합쳤습니다.")
+        return {'FINISHED'}
+
+
+def bridge_tangents(bm, faces, chains):
+    """
+    다리가 테두리 정점에서 뻗어 나갈 방향(Bezier 접선)을 정점마다 구한다.
+
+    면을 선택했으면 그 정점이 속한 선택 면 노멀의 평균을, 선만 선택했으면 기존 면을 따라
+    테두리 바깥으로 이어지는 방향(안쪽 선 → 테두리 정점)의 평균을 쓴다. 정할 수 없으면 넣지 않는다.
+    """
+    tangents = {}
+    if faces:
+        face_set = set(faces)
+        for verts, _closed in chains:
+            for vert in verts:
+                normal = sum((face.normal for face in vert.link_faces if face in face_set), Vector())
+                if normal.length > 1e-8:
+                    tangents[vert] = normal.normalized()
+        return tangents
+    chain_edges = {
+        bm.edges.get((verts[index], verts[(index + 1) % len(verts)]))
+        for verts, closed in chains
+        for index in range(len(verts) if closed else len(verts) - 1)
+    }
+    for verts, _closed in chains:
+        for vert in verts:
+            direction = Vector()
+            for edge in vert.link_edges:
+                if edge in chain_edges or edge.hide:
+                    continue
+                direction += (vert.co - edge.other_vert(vert).co).normalized()
+            if direction.length > 1e-8:
+                tangents[vert] = direction.normalized()
+    return tangents
+
+
+def bridge_curve_point(start: Vector, end: Vector, start_tangent, end_tangent, smoothness: float, t: float) -> Vector:
+    """
+    두 테두리 정점 사이 다리 위의 점. 접선이 있으면 3차 Bezier로, 없으면 직선으로 보간한다.
+
+    조절점은 고르게 나눈 직선 위의 점(smoothness 0)과 각 끝에서 접선 방향으로 거리의 1/3만큼
+    떨어진 점(smoothness 1) 사이를 보간해, 두 면이 바라보는 방향을 따라 휘게 한다.
+    """
+    reach = (end - start).length / 3.0
+    first = start.lerp(end, 1.0 / 3.0)
+    second = start.lerp(end, 2.0 / 3.0)
+    if start_tangent is not None:
+        first = first.lerp(start + start_tangent * reach, smoothness)
+    if end_tangent is not None:
+        second = second.lerp(end + end_tangent * reach, smoothness)
+    u = 1.0 - t
+    return start * (u * u * u) + first * (3.0 * u * u * t) + second * (3.0 * u * t * t) + end * (t * t * t)
+
+
+def bridge_vert_pairs(bm, chain_pairs, closed: bool, cuts: int = 0, tangents=None, smoothness: float = 1.0) -> list:
+    """
+    짝지은 두 선 묶음 사이를 사각형 면으로 잇고, 새 면 목록을 돌려준다.
+
+    cuts만큼 다리를 가로로 나누고, 새 정점은 테두리 접선을 따르는 Bezier 곡선 위에 둔다.
+    이어진 기존 면과 노멀 방향이 맞도록 필요하면 새 면을 모두 뒤집는다.
+    """
+    tangents = tangents or {}
+    # 짝마다 한쪽 테두리에서 다른 쪽 테두리까지 늘어선 정점 줄
+    rails = []
+    for a, b in chain_pairs:
+        rail = [a]
+        for step in range(1, cuts + 1):
+            point = bridge_curve_point(
+                a.co, b.co, tangents.get(a), tangents.get(b), smoothness, step / (cuts + 1)
+            )
+            rail.append(bm.verts.new(point))
+        rail.append(b)
+        rails.append(rail)
+    count = len(rails)
+    steps = count if closed else count - 1
+    new_faces = []
+    for index in range(steps):
+        current, following = rails[index], rails[(index + 1) % count]
+        for row in range(cuts + 1):
+            verts = (current[row], following[row], following[row + 1], current[row + 1])
+            if len(set(verts)) < 4 or bm.faces.get(verts) is not None:
+                continue
+            # 재질·스무스 설정은 맞닿은 기존 면을 따른다.
+            example = next((face for vert in (current[0], following[0], current[-1]) for face in vert.link_faces), None)
+            new_faces.append(bm.faces.new(verts, example))
+    # 새 면과 기존 면이 공유하는 선은 서로 반대 방향으로 지나야 노멀이 일관된다.
+    created = set(new_faces)
+    flip = None
+    for face in new_faces:
+        for loop in face.loops:
+            other = next((f for f in loop.edge.link_faces if f not in created), None)
+            if other is not None:
+                other_loop = next(l for l in other.loops if l.edge is loop.edge)
+                flip = other_loop.vert is loop.vert
+                break
+        if flip is not None:
+            break
+    for face in new_faces:
+        if flip:
+            face.normal_flip()
+        face.normal_update()
+    return new_faces
+
+
+class MESH_OT_CatBridge(Operator):
+    """마주보는 두 선 줄·루프 사이를 면으로 잇습니다. 마주보는 두 면(면 묶음)을 선택하면 그 면을 지우고 두 테두리 사이를 관처럼 잇습니다. Bridge Edge Loops와 같지만 면 선택에서도 바로 동작합니다."""
+    bl_idname = "mesh.cat_bridge"
+    bl_label = "Bridge"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    cuts: IntProperty(
+        name="Subdivisions",
+        description="다리를 가로로 나눌 횟수. 나눈 정점은 양 끝 면의 방향을 따르는 곡선 위에 놓인다",
+        default=0, min=0, soft_max=16, max=64,
+    ) # type: ignore
+    smoothness: FloatProperty(
+        name="Smoothness",
+        description="양 끝 면의 노멀(선만 선택하면 이어진 면의 흐름) 방향을 따라 휘는 정도 (0이면 직선, 1이면 Bezier 기본 곡률)",
+        default=1.0, min=0.0, soft_max=2.0, max=4.0,
+    ) # type: ignore
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'EDIT_MESH'
+
+    def execute(self, context) -> Set[str]:
+        plans = []
+        for obj in edit_mesh_objects(context):
+            bm = bmesh.from_edit_mesh(obj.data)
+            chains, faces, error, windings = selected_edge_chains(bm)
+            if error is not None:
+                self.report({'WARNING'}, f"{obj.name}: {error}")
+                return {'CANCELLED'}
+            if chains == []:
+                continue
+            groups = pair_chain_groups(chains, windings) if chains is not None else None
+            if groups is None:
+                if faces:
+                    message = f"{obj.name}: 테두리 정점 수가 같고 서로 떨어진 면(면 묶음)을 마주보는 쌍으로 선택하세요."
+                else:
+                    message = f"{obj.name}: 선 수가 같은 선 줄·루프를 마주보는 쌍으로 선택하세요."
+                self.report({'WARNING'}, message)
+                return {'CANCELLED'}
+            # 면을 지우기 전에 곡선 접선(면 노멀 또는 이어진 면의 흐름)을 구해 둔다.
+            tangents = bridge_tangents(bm, faces, chains) if self.cuts else {}
+            plans.append((obj, bm, groups, faces, tangents))
+        if not plans:
+            self.report({'WARNING'}, "이을 두 선 줄이나 두 면을 선택하세요.")
+            return {'CANCELLED'}
+
+        created = 0
+        removed = 0
+        for obj, bm, groups, faces, tangents in plans:
+            if faces:
+                # 테두리 선·정점은 남기고 면과 영역 안쪽 선·정점만 지운다.
+                bmesh.ops.delete(bm, geom=faces, context='FACES_KEEP_BOUNDARY')
+                removed += len(faces)
+            for element in (*bm.verts, *bm.edges, *bm.faces):
+                element.select = False
+            for chain_pairs, closed in groups:
+                for face in bridge_vert_pairs(bm, chain_pairs, closed, self.cuts, tangents, self.smoothness):
+                    face.select_set(True)
+                    created += 1
+            bm.select_flush_mode()
+            bmesh.update_edit_mesh(obj.data)
+        prefix = f"면 {removed}개를 지우고 " if removed else ""
+        self.report({'INFO'}, f"{prefix}다리 면 {created}개를 만들었습니다.")
         return {'FINISHED'}
 
 
@@ -3652,6 +3895,9 @@ def register_keymaps() -> None:
     addon_keymaps.append((keymap, item))
     item = keymap.keymap_items.new(MESH_OT_CatMergeEdges.bl_idname, 'E', 'PRESS', ctrl=True, alt=True)
     addon_keymaps.append((keymap, item))
+    # Ctrl+Shift+E는 기본 키맵에서 비어 있다.
+    item = keymap.keymap_items.new(MESH_OT_CatBridge.bl_idname, 'E', 'PRESS', ctrl=True, shift=True)
+    addon_keymaps.append((keymap, item))
     # 기본 Alt+J(Tris to Quads) 옆에 둔다. Ctrl+Alt+J는 기본 키맵에서 비어 있다.
     item = keymap.keymap_items.new(MESH_OT_CatTrisToQuads.bl_idname, 'J', 'PRESS', ctrl=True, alt=True)
     addon_keymaps.append((keymap, item))
@@ -3673,6 +3919,7 @@ classes = [
     OBJECT_OT_CatSelectHiddenFaces,
     MESH_OT_CatPaletteColor,
     MESH_OT_CatMergeEdges,
+    MESH_OT_CatBridge,
     MESH_OT_CatTrisToQuads,
     # OBJECT_PT_Spacing,
     # OBJECT_PT_Mirror_Modifier,
