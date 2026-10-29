@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 23, 0),
+    "version": (1, 23, 1),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -2900,7 +2900,9 @@ def align_chains(first_chain, second_chain, first_winding=None, second_winding=N
     first_center = sum((vert.co for vert in first), Vector()) / len(first)
     second_center = sum((vert.co for vert in second), Vector()) / len(second)
     axis = second_center - first_center
-    if axis.length > 1e-8:
+    # 두 중심이 거의 겹치면(X자로 엇갈린 두 뚜껑 등) 중심을 잇는 방향이 잡음뿐이라 비춰 볼 평면이 없다.
+    size = max((vert.co - first_center).length for vert in first)
+    if axis.length > max(1e-8, 0.05 * size):
         axis.normalize()
         middle = (first_center + second_center) * 0.5
 
@@ -2922,9 +2924,12 @@ def merge_vert_pairs(bm, pairs) -> list:
     targetmap = {}
     kept = []
     for keep, remove in pairs:
+        kept.append(keep)
+        # 두 테두리가 이미 공유한 정점은 그대로 둔다.
+        if keep is remove:
+            continue
         keep.co = (keep.co + remove.co) * 0.5
         targetmap[remove] = keep
-        kept.append(keep)
     bmesh.ops.weld_verts(bm, targetmap=targetmap)
     return kept
 
@@ -2934,6 +2939,25 @@ def face_region_boundary(faces):
     face_set = set(faces)
     edges = {edge for face in faces for edge in face.edges}
     return [edge for edge in edges if sum(1 for face in edge.link_faces if face in face_set) == 1]
+
+
+def face_edge_groups(faces) -> list:
+    """선택한 면을 선을 공유해 이어진 면 영역끼리 묶는다(정점만 공유하는 면은 다른 영역)."""
+    left = set(faces)
+    groups = []
+    while left:
+        stack = [left.pop()]
+        group = [stack[0]]
+        while stack:
+            face = stack.pop()
+            for edge in face.edges:
+                for other in edge.link_faces:
+                    if other in left:
+                        left.remove(other)
+                        stack.append(other)
+                        group.append(other)
+        groups.append(group)
+    return groups
 
 
 def chain_winding(bm, verts, faces) -> int:
@@ -2972,10 +2996,20 @@ def selected_edge_chains(bm):
         face_edges = {edge for face in faces for edge in face.edges}
         if any(edge not in face_edges for edge in edges):
             return None, faces, "면과 따로 떨어진 선을 함께 선택하지 마세요.", None
-        edges = face_region_boundary(faces)
-        if not edges:
-            return None, faces, "테두리가 있는 면을 선택하세요.", None
-    chains = edge_chains(edges)
+        # 면 영역마다 테두리 루프를 따로 만든다. 두 면이 정점만 공유해(X자로 엇갈린 뚜껑 등)
+        # 테두리가 한 정점에서 네 갈래로 만나도 영역별로는 한 줄로 이어진다.
+        chains = []
+        for group in face_edge_groups(faces):
+            boundary = face_region_boundary(group)
+            if not boundary:
+                return None, faces, "테두리가 있는 면을 선택하세요.", None
+            group_chains = edge_chains(boundary)
+            if group_chains is None:
+                chains = None
+                break
+            chains += group_chains
+    else:
+        chains = edge_chains(edges)
     windings = [chain_winding(bm, verts, faces) for verts, _closed in chains] if chains else None
     return chains, faces, None, windings
 
@@ -3174,6 +3208,9 @@ class MESH_OT_CatBridge(Operator):
                 else:
                     message = f"{obj.name}: 선 수가 같은 선 줄·루프를 마주보는 쌍으로 선택하세요."
                 self.report({'WARNING'}, message)
+                return {'CANCELLED'}
+            if any(a is b for chain_pairs, _closed in groups for a, b in chain_pairs):
+                self.report({'WARNING'}, f"{obj.name}: 정점을 공유한 두 테두리는 Bridge로 이을 수 없습니다. Merge(Ctrl+Alt+E)를 쓰세요.")
                 return {'CANCELLED'}
             # 면을 지우기 전에 곡선 접선(면 노멀 또는 이어진 면의 흐름)을 구해 둔다.
             tangents = bridge_tangents(bm, faces, chains) if self.cuts else {}

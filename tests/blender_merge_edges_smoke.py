@@ -145,6 +145,55 @@ def signed_volume(bm) -> float:
     )
 
 
+def check_crossed_caps() -> None:
+    """정점 두 개를 공유하며 X자로 엇갈린 두 뚜껑 면을 Merge한다(두 테두리가 공유 정점에서 네 갈래로 만남)."""
+    if bpy.context.object is not None and bpy.context.object.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.ops.object.delete(use_global=False)
+    bm = bmesh.new()
+    caps = []
+    for tilt, reach in ((20.0, -1.0), (-20.0, 1.0)):
+        # 뚜껑 평면은 Y축과 X축을 Y축 둘레로 tilt만큼 돌린 방향이 이루며, 두 뚜껑은 ±Y 정점을 공유한다.
+        side = Matrix.Rotation(math.radians(tilt), 3, "Y") @ Vector((0.0, 0.0, 1.0))
+        normal = side.cross(Vector((0.0, 1.0, 0.0))).normalized()
+        ring = [side * (0.5 * math.cos(math.radians(45 * i))) + Vector((0.0, 0.5 * math.sin(math.radians(45 * i)), 0.0))
+                for i in range(8)]
+        near = [bm.verts.new(co) for co in ring]
+        far = [bm.verts.new(co + normal * reach) for co in ring]
+        tube = [bm.faces.new((near[i], near[(i + 1) % 8], far[(i + 1) % 8], far[i])) for i in range(8)]
+        cap = bm.faces.new(near)
+        tube += [cap, bm.faces.new(far)]
+        bmesh.ops.recalc_face_normals(bm, faces=tube)
+        caps.append(cap)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=1e-6)
+    assert len(bm.verts) == 30, len(bm.verts)
+    mesh = bpy.data.meshes.new("CrossedCaps")
+    for face in bm.faces:
+        face.select = face in caps
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = bpy.data.objects.new("CrossedCaps", mesh)
+    bpy.context.collection.objects.link(obj)
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.context.tool_settings.mesh_select_mode = (False, False, True)
+    assert sum(face.select for face in bmesh.from_edit_mesh(obj.data).faces) == 2
+    # 정점을 공유한 두 테두리는 Bridge로 잇지 않는다(다리 면이 찌그러짐).
+    assert bpy.ops.mesh.cat_bridge() == {"CANCELLED"}
+    assert len(bmesh.from_edit_mesh(obj.data).verts) == 30
+    assert bpy.ops.mesh.cat_merge_edges() == {"FINISHED"}
+    bm = bmesh.from_edit_mesh(obj.data)
+    assert len(bm.verts) == 30 - 6, len(bm.verts)
+    assert len(bm.faces) == 18, len(bm.faces)
+    assert all(len(edge.link_faces) == 2 for edge in bm.edges), "꺾인 관에 열린 테두리가 남았습니다."
+    assert normals_consistent(bm), "합친 관의 노멀이 뒤집혔습니다."
+    assert signed_volume(bm) > 0.0
+    # 엇갈린 뚜껑 정점은 위아래 짝끼리 x만 다르므로, 합친 정점은 x=0 평면 위에 놓인다.
+    assert all(abs(vert.co.x) < 1e-5 for vert in bm.verts if vert.select), "합친 링이 x=0 평면에 있어야 합니다."
+
+
 def check_bridge(module) -> None:
     """Bridge: 마주보는 면 묶음을 지우고 두 테두리 사이를 관처럼 잇는다. 선 줄 선택도 잇는다."""
     item = next(item for _keymap, item in module.addon_keymaps if item.idname == "mesh.cat_bridge")
@@ -353,6 +402,10 @@ def main() -> None:
         assert len(bmesh.from_edit_mesh(obj.data).faces) == 3
         assert bpy.ops.mesh.cat_bridge() == {"CANCELLED"}
         assert coords(obj) == before
+
+        # 9) X자로 엇갈려 위아래 정점 두 개를 공유한 두 8각 뚜껑(용 몸통 관절처럼 꺾인 두 관) → 공유 정점은 그대로,
+        #    나머지 6쌍만 정중앙에서 합쳐 노멀이 일관된 꺾인 관이 된다.
+        check_crossed_caps()
 
         check_bridge(module)
         print("CatTools merge edges smoke: OK")
