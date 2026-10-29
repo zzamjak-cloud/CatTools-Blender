@@ -407,6 +407,33 @@ def main() -> None:
         #    나머지 6쌍만 정중앙에서 합쳐 노멀이 일관된 꺾인 관이 된다.
         check_crossed_caps()
 
+        # 10) 정점 수가 다른 두 뚜껑(8각 + 6각): 6쌍을 정중앙에서 합치고 남는 정점 두 개의 틈은 삼각형으로 메운다.
+        if bpy.context.object is not None and bpy.context.object.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.select_all(action="SELECT")
+        bpy.ops.object.delete(use_global=False)
+        bm = bmesh.new()
+        for segments, z in ((8, -0.7), (6, 0.7)):
+            bmesh.ops.create_cone(bm, cap_ends=True, segments=segments, radius1=1.0, radius2=1.0, depth=1.0,
+                                  matrix=Matrix.Translation((0.0, 0.0, z)))
+        mesh = bpy.data.meshes.new("UnevenCaps")
+        bm.to_mesh(mesh)
+        bm.free()
+        obj = bpy.data.objects.new("UnevenCaps", mesh)
+        bpy.context.collection.objects.link(obj)
+        bpy.context.view_layer.objects.active = obj
+        obj.select_set(True)
+        bpy.ops.object.mode_set(mode="EDIT")
+        bpy.context.tool_settings.mesh_select_mode = (False, False, True)
+        select_faces(obj, lambda face: abs(face.calc_center_median().z) < 0.2 + 1e-4)
+        assert bpy.ops.mesh.cat_merge_edges() == {"FINISHED"}
+        bm = bmesh.from_edit_mesh(obj.data)
+        assert len(bm.verts) == 16 + 12 - 6, len(bm.verts)
+        assert sum(1 for face in bm.faces if len(face.verts) == 3) == 2
+        assert all(len(edge.link_faces) == 2 for edge in bm.edges), "합친 관에 열린 테두리가 남았습니다."
+        assert normals_consistent(bm) and signed_volume(bm) > 0.0, "합친 관의 노멀이 뒤집혔습니다."
+        assert all(abs(vert.co.z) < 0.2 for vert in bm.verts if vert.select)
+
         check_bridge(module)
         print("CatTools merge edges smoke: OK")
     finally:

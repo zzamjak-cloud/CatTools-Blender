@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 23, 1),
+    "version": (1, 23, 2),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -2919,6 +2919,87 @@ def align_chains(first_chain, second_chain, first_winding=None, second_winding=N
     return chain_distance(first, best), list(zip(first, best))
 
 
+def align_uneven_loops(small_chain, large_chain, small_winding=None, large_winding=None):
+    """
+    정점 수가 다른 두 닫힌 루프를 맞춘다. 작은 루프의 정점마다 큰 루프의 정점 하나를 순서대로 짝짓는다.
+
+    Returns:
+        (거리, 작은 루프 정점 목록, 시작점·방향을 맞춘 큰 루프 정점 목록, 작은 정점별 짝 번호) 또는 None
+    """
+    (small, small_closed), (large, large_closed) = small_chain, large_chain
+    n, m = len(small), len(large)
+    if not (small_closed and large_closed) or n >= m or n < 3:
+        return None
+    directions = [(large, 1), (large[::-1], -1)]
+    if small_winding and large_winding:
+        # 같은 수 루프와 마찬가지로 남는 면이 서로 반대 방향으로 감겨야 합친 면이 꼬이지 않는다.
+        directions = [(sequence, sign) for sequence, sign in directions if small_winding * large_winding * sign == -1]
+    best = None
+    for sequence, _sign in directions:
+        for offset in range(m):
+            ordered = sequence[offset:] + sequence[:offset]
+            # 작은 루프 0번은 큰 루프 0번과 짝짓고, 나머지는 순서를 지키며 거리 제곱 합이 가장 작게 고른다.
+            cost = [[math.inf] * m for _ in range(n)]
+            choice = [[-1] * m for _ in range(n)]
+            cost[0][0] = (small[0].co - ordered[0].co).length_squared
+            for i in range(1, n):
+                running, running_at = math.inf, -1
+                for j in range(i, m - (n - 1 - i)):
+                    if cost[i - 1][j - 1] < running:
+                        running, running_at = cost[i - 1][j - 1], j - 1
+                    cost[i][j] = running + (small[i].co - ordered[j].co).length_squared
+                    choice[i][j] = running_at
+            end = min(range(n - 1, m), key=lambda j: cost[n - 1][j])
+            if best is not None and cost[n - 1][end] >= best[0]:
+                continue
+            matched = [end]
+            for i in range(n - 1, 0, -1):
+                matched.append(choice[i][matched[-1]])
+            best = (cost[n - 1][end], small, ordered, matched[::-1])
+    return best
+
+
+def merge_uneven_loops(bm, small, large, matched) -> list:
+    """
+    align_uneven_loops 결과대로 짝지은 정점을 정중앙으로 합치고, 짝 없는 큰 루프 정점은 합친 링 위 사이에 놓은 뒤
+    그 정점이 남긴 틈을 면으로 메운다. 남은 정점 목록을 돌려준다.
+    """
+    n, m = len(small), len(large)
+    gaps = []
+    moves = {}
+    for i in range(n):
+        start, stop = matched[i], matched[(i + 1) % n] + (m if i == n - 1 else 0)
+        between = [large[j % m] for j in range(start + 1, stop)]
+        gaps.append((large[start], between, large[stop % m]))
+        if not between:
+            continue
+        # 짝 없는 정점은 큰 루프에서의 길이 비율대로 작은 루프 선 위의 점과 정중앙에 놓는다.
+        path = [large[start]] + between + [large[stop % m]]
+        lengths = [(path[k + 1].co - path[k].co).length for k in range(len(path) - 1)]
+        total = sum(lengths) or 1.0
+        walked = 0.0
+        for k, vert in enumerate(between):
+            walked += lengths[k]
+            target = small[i].co.lerp(small[(i + 1) % n].co, walked / total)
+            moves[vert] = (vert.co + target) * 0.5
+    for vert, co in moves.items():
+        vert.co = co
+    kept = merge_vert_pairs(bm, [(large[matched[i]], small[i]) for i in range(n)])
+    for first, between, last in gaps:
+        if not between:
+            continue
+        edge = bm.edges.get((first, last))
+        if edge is None or len(edge.link_loops) != 1:
+            continue
+        # [first, …, last] 면은 닫는 선을 last → first로 지난다. 기존 면과 반대 방향이 되도록 감아 노멀을 맞춘다.
+        verts = [first] + between + [last]
+        if edge.link_loops[0].vert is last:
+            verts.reverse()
+        face = bm.faces.new(verts, edge.link_loops[0].face)
+        face.select = True
+    return kept + [vert for _first, between, _last in gaps for vert in between]
+
+
 def merge_vert_pairs(bm, pairs) -> list:
     """짝지은 정점을 두 점의 정중앙으로 합치고, 남은 정점 목록을 돌려준다."""
     targetmap = {}
@@ -3036,26 +3117,48 @@ class MESH_OT_CatMergeEdges(Operator):
             if chains == []:
                 continue
             pairs = pair_chain_verts(chains, windings) if chains is not None else None
-            if pairs is None:
+            uneven = None
+            if pairs is None and chains is not None and len(chains) == 2:
+                # 정점 수가 다른 두 닫힌 루프(8각 + 6각 뚜껑 등)는 작은 루프 정점마다 가까운 정점을 순서대로 짝짓는다.
+                order = sorted(range(2), key=lambda k: len(chains[k][0]))
+                # 면 선택이면 두 면 묶음이 서로 마주봐야(노멀이 반대쪽) 한다. 나란히 놓인 면끼리는 합치지 않는다.
+                facing = True
                 if faces:
-                    message = f"{obj.name}: 테두리 정점 수가 같고 서로 떨어진 면(면 묶음)을 마주보는 쌍으로 선택하세요."
+                    face_set = set(faces)
+                    normals = [
+                        sum((face.normal for vert in verts for face in vert.link_faces if face in face_set), Vector())
+                        for verts, _closed in chains
+                    ]
+                    facing = normals[0].dot(normals[1]) < 0.0
+                if facing:
+                    uneven = align_uneven_loops(
+                        chains[order[0]], chains[order[1]], windings[order[0]], windings[order[1]],
+                    )
+            if pairs is None and uneven is None:
+                if faces:
+                    message = f"{obj.name}: 서로 떨어진 두 면(면 묶음)을 마주보는 쌍으로 선택하세요. 테두리 정점 수가 다르면 닫힌 루프여야 합니다."
                 else:
                     message = f"{obj.name}: 선 수가 같은 선·선 줄·루프를 마주보는 쌍으로 선택하세요."
                 self.report({'WARNING'}, message)
                 return {'CANCELLED'}
-            plans.append((obj, bm, pairs, faces))
+            plans.append((obj, bm, pairs, faces, uneven))
         if not plans:
             self.report({'WARNING'}, "합칠 두 선이나 두 면을 선택하세요.")
             return {'CANCELLED'}
 
         merged = 0
         removed = 0
-        for obj, bm, pairs, faces in plans:
+        for obj, bm, pairs, faces, uneven in plans:
             if faces:
                 # 테두리 선·정점은 남기고 면과 영역 안쪽 선·정점(부채꼴 중심 등)만 지운다.
                 bmesh.ops.delete(bm, geom=faces, context='FACES_KEEP_BOUNDARY')
                 removed += len(faces)
-            kept = set(merge_vert_pairs(bm, pairs))
+            if uneven is not None:
+                _distance, small, large, matched = uneven
+                kept = set(merge_uneven_loops(bm, small, large, matched))
+                pairs = small
+            else:
+                kept = set(merge_vert_pairs(bm, pairs))
             for vert in kept:
                 vert.select = True
             for edge in bm.edges:
