@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 22, 0),
+    "version": (1, 23, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -415,6 +415,8 @@ class OBJECT_PT_WoodyTool(Panel):
         operator = row.operator(VIEW3D_OT_CatDrawPrimitive.bl_idname, text="Cube", icon='MESH_CUBE')
         operator.shape = 'CUBE'
         layout.operator(MESH_OT_CatTrisToQuads.bl_idname, text="Tris to Quads (Ctrl+Alt+J)", icon='MESH_PLANE')
+        # 원통·원뿔의 둘레 각 수를 형태는 유지한 채 줄인다.
+        layout.operator(MESH_OT_CatReduceSides.bl_idname, text="Reduce Sides", icon='MESH_CIRCLE')
 
         layout.separator(factor=1)
 
@@ -3355,6 +3357,290 @@ class MESH_OT_CatTrisToQuads(Operator):
         return {'FINISHED'}
 
 
+# 원통·원뿔의 각 줄이기: 축 둘레 같은 각도에 놓인 정점 줄(살)을 골라 지우고, 남은 살을 고르게 다시 펼친다 -----------
+
+def selected_vert_components(verts) -> list:
+    """정점들을 서로 선으로 이어진 덩어리로 나눈다(선의 두 끝이 모두 verts에 있어야 이어진 것으로 본다)."""
+    left = set(verts)
+    components = []
+    while left:
+        stack = [left.pop()]
+        component = [stack[0]]
+        while stack:
+            vert = stack.pop()
+            for edge in vert.link_edges:
+                other = edge.other_vert(vert)
+                if other in left:
+                    left.remove(other)
+                    stack.append(other)
+                    component.append(other)
+        components.append(component)
+    return components
+
+
+# 둘레 선 판정: 선 방향이 그 자리의 원 접선과 이루는 코사인이 이 값보다 크면 둘레 선으로 본다.
+REDUCE_RING_EDGE_COS = 0.7
+
+
+def spoke_layout(verts, center: Vector, axis: Vector):
+    """
+    축 둘레를 도는 둘레 선과 그 사이를 잇는 세로 선을 나눠, 세로 선으로 이어진 정점 줄(살)을 찾는다.
+
+    살은 각도가 아니라 선 연결로 묶으므로 손으로 다듬어 비틀리거나 고르지 않은 원통도 처리한다.
+    원통·원뿔 형태(살이 둘레 선으로 한 바퀴 고리를 이룸)가 아니면 None.
+
+    Returns:
+        (살 목록 [(평균 각도, [정점...])], 정점 → 살 번호(축 위 정점은 -1), 판정 선명도 0..1)
+    """
+    u = plane_axis(axis)
+    v = axis.cross(u)
+
+    def radial(co):
+        offset = co - center
+        return offset - axis * offset.dot(axis)
+
+    max_radius = max((radial(vert.co).length for vert in verts), default=0.0)
+    if max_radius <= 1e-9:
+        return None
+    on_axis = {vert for vert in verts if radial(vert.co).length <= 1e-4 * max_radius}
+    # 세로 선(둘레 선이 아닌 선)으로 이어진 축 밖 정점끼리 한 살로 묶는다.
+    parent = {vert: vert for vert in verts if vert not in on_axis}
+
+    def root_of(vert):
+        while parent[vert] is not vert:
+            parent[vert] = parent[parent[vert]]
+            vert = parent[vert]
+        return vert
+
+    ring_edges = []
+    clarity = 0.0
+    edges = {edge for vert in parent for edge in vert.link_edges if edge.other_vert(vert) in parent}
+    for edge in edges:
+        vert, other = edge.verts
+        direction = other.co - vert.co
+        tangent = axis.cross(radial((vert.co + other.co) * 0.5))
+        if direction.length <= 1e-12 or tangent.length <= 1e-12:
+            return None
+        alignment = abs(direction.normalized().dot(tangent.normalized()))
+        if alignment > REDUCE_RING_EDGE_COS:
+            ring_edges.append((vert, other))
+            clarity += alignment
+        else:
+            parent[root_of(vert)] = root_of(other)
+            clarity += 1.0 - alignment
+    groups = {}
+    for vert in parent:
+        groups.setdefault(root_of(vert), []).append(vert)
+    roots = list(groups)
+    if len(roots) < 3:
+        return None
+    number_of = {root: number for number, root in enumerate(roots)}
+    index = {vert: -1 for vert in on_axis}
+    for root, members in groups.items():
+        for vert in members:
+            index[vert] = number_of[root]
+    # 둘레 선은 서로 다른 살을 이어야 하고, 살들은 둘레 선으로 한 바퀴 고리를 이뤄야 한다.
+    neighbors = {number: set() for number in range(len(roots))}
+    for a, b in ring_edges:
+        if index[a] == index[b]:
+            return None
+        neighbors[index[a]].add(index[b])
+        neighbors[index[b]].add(index[a])
+    if any(len(linked) != 2 for linked in neighbors.values()):
+        return None
+    previous, current, seen = 0, min(neighbors[0]), 1
+    while current != 0:
+        previous, current = current, next(n for n in neighbors[current] if n != previous)
+        seen += 1
+    if seen != len(roots):
+        return None
+    spokes = []
+    for root in roots:
+        members = groups[root]
+        sin_sum = sum(radial(vert.co).normalized().dot(v) for vert in members)
+        cos_sum = sum(radial(vert.co).normalized().dot(u) for vert in members)
+        spokes.append((math.atan2(sin_sum, cos_sum), members))
+    return spokes, index, clarity / max(len(edges), 1)
+
+
+def find_spoke_layout(verts, axis_mode: str):
+    """축을 정하고 살로 묶는다. Auto면 로컬 X·Y·Z와 정점 분포의 주축 중 선이 둘레·세로로 가장 또렷하게 나뉘는 축을 고른다."""
+    center = sum((vert.co for vert in verts), Vector()) / len(verts)
+    if axis_mode != 'AUTO':
+        axes = [Vector([1.0 if axis_mode == name else 0.0 for name in 'XYZ'])]
+    else:
+        axes = [Vector((0.0, 0.0, 1.0)), Vector((1.0, 0.0, 0.0)), Vector((0.0, 1.0, 0.0))]
+        coords = np.array([tuple(vert.co - center) for vert in verts], dtype=float)
+        _values, vectors = np.linalg.eigh(coords.T @ coords)
+        axes += [Vector(vectors[:, i]).normalized() for i in range(3)]
+    best = None
+    for axis in axes:
+        layout = spoke_layout(verts, center, axis)
+        if layout is not None and (best is None or layout[2] > best[2][2] + 1e-6):
+            best = (center, axis, layout)
+    return best
+
+
+def pick_kept_spokes(angles: list, sides: int, offset: int):
+    """
+    고르게 놓일 sides개 목표 각도에 가장 가까운 살을 고른다.
+
+    Returns:
+        [(살 번호, 목표 각도)]. 움직임이 가장 적은 시작 살을 고르고(같으면 각도 0에 가까운 살), offset 칸만큼 돌린다.
+    """
+    count = len(angles)
+
+    def circular(a, b):
+        return abs((a - b + math.pi) % (2.0 * math.pi) - math.pi)
+
+    def assign(anchor):
+        used = set()
+        result = []
+        for k in range(sides):
+            target = angles[anchor] + 2.0 * math.pi * k / sides
+            choice = min((i for i in range(count) if i not in used), key=lambda i: circular(angles[i], target))
+            used.add(choice)
+            result.append((choice, target))
+        return result
+
+    scored = []
+    for anchor in range(count):
+        result = assign(anchor)
+        cost = sum(circular(angles[i], target) ** 2 for i, target in result)
+        scored.append((round(cost, 9), circular(angles[anchor], 0.0), anchor))
+    best_anchor = min(scored)[2]
+    return assign((best_anchor + offset) % count)
+
+
+def reduce_sides(bm, verts, sides: int, axis_mode: str, offset: int, keep_area: bool):
+    """
+    원통·원뿔 한 덩어리의 각을 sides개로 줄인다.
+
+    Returns:
+        (원래 각 수, 오류 메시지 또는 None)
+    """
+    found = find_spoke_layout(verts, axis_mode)
+    if found is None:
+        return 0, "shape"
+    center, axis, (spokes, index, _clarity) = found
+    count = len(spokes)
+    if sides >= count:
+        return count, "sides"
+    kept = pick_kept_spokes([angle for angle, _verts in spokes], sides, offset)
+    kept_numbers = {number for number, _target in kept}
+    removed = {vert for number, (_angle, spoke) in enumerate(spokes) if number not in kept_numbers for vert in spoke}
+    # 지울 살 안의 선(세로·지름 방향)과 그 살에서 축 위 정점으로 가는 선을 녹인다. 남은 둘레 정점도 함께 녹인다.
+    edges = {
+        edge for vert in removed for edge in vert.link_edges
+        if edge.other_vert(vert) in removed and index[edge.other_vert(vert)] == index[vert]
+        or index.get(edge.other_vert(vert)) == -1
+    }
+    if edges:
+        bmesh.ops.dissolve_edges(bm, edges=list(edges), use_verts=True, use_face_split=False)
+    leftover = [vert for vert in removed if vert.is_valid and len(vert.link_edges) == 2]
+    if leftover:
+        bmesh.ops.dissolve_verts(bm, verts=leftover)
+    # 남긴 살을 목표 각도로 돌리고, 원하면 단면 넓이가 같도록 반지름을 넓힌다.
+    scale = 1.0
+    if keep_area:
+        scale = math.sqrt((count * math.sin(2.0 * math.pi / count)) / (sides * math.sin(2.0 * math.pi / sides)))
+    for number, target in kept:
+        rotation = Matrix.Rotation(target - spokes[number][0], 3, axis)
+        for vert in spokes[number][1]:
+            offset_vec = vert.co - center
+            height = axis * offset_vec.dot(axis)
+            vert.co = center + height + rotation @ (offset_vec - height) * scale
+    return count, None
+
+
+class MESH_OT_CatReduceSides(Operator):
+    """선택한 원통·원뿔 메쉬(Object 모드에서는 선택한 오브젝트 전체)의 둘레 각 수를 줄입니다. 축 둘레의 정점 줄 일부를 녹이고 남은 줄을 고르게 다시 펼쳐, 높이·반지름·뚜껑은 그대로 둡니다."""
+    bl_idname = "mesh.cat_reduce_sides"
+    bl_label = "Reduce Sides"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    sides: IntProperty(
+        name="Sides",
+        description="줄인 뒤의 둘레 각 수. 원래 각 수보다 작아야 합니다",
+        default=6,
+        min=3,
+        max=256,
+    ) # type: ignore
+    offset: IntProperty(
+        name="Offset",
+        description="남길 정점 줄을 원래 줄 몇 칸만큼 돌려 고릅니다",
+        default=0,
+        min=0,
+        max=255,
+    ) # type: ignore
+    keep_area: BoolProperty(
+        name="Keep Area",
+        description="각이 줄어 단면이 가늘어 보이지 않도록 반지름을 넓혀 단면 넓이를 유지합니다",
+        default=False,
+    ) # type: ignore
+    axis: EnumProperty(
+        name="Axis",
+        items=[
+            ('AUTO', "Auto", "형태에서 축을 찾음"),
+            ('X', "X", "로컬 X축"),
+            ('Y', "Y", "로컬 Y축"),
+            ('Z', "Z", "로컬 Z축"),
+        ],
+        default='AUTO',
+    ) # type: ignore
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode == 'EDIT_MESH':
+            return True
+        return context.mode == 'OBJECT' and any(obj.type == 'MESH' for obj in context.selected_objects)
+
+    def execute(self, context) -> Set[str]:
+        edit = context.mode == 'EDIT_MESH'
+        objects = edit_mesh_objects(context) if edit else [obj for obj in context.selected_objects if obj.type == 'MESH']
+        done = []
+        failed = {"shape": 0, "sides": 0}
+        for obj in objects:
+            if edit:
+                bm = bmesh.from_edit_mesh(obj.data)
+                verts = [vert for vert in bm.verts if vert.select and not vert.hide]
+            else:
+                bm = bmesh.new()
+                bm.from_mesh(obj.data)
+                verts = list(bm.verts)
+            changed = False
+            for component in selected_vert_components(verts):
+                count, error = reduce_sides(
+                    bm, component, self.sides, self.axis, self.offset, self.keep_area,
+                )
+                if error is None:
+                    done.append(count)
+                    changed = True
+                else:
+                    failed[error] += 1
+            if edit:
+                if changed:
+                    bm.select_flush_mode()
+                    bmesh.update_edit_mesh(obj.data)
+            else:
+                if changed:
+                    bm.to_mesh(obj.data)
+                    obj.data.update()
+                bm.free()
+        if not done:
+            if failed["sides"]:
+                self.report({'WARNING'}, f"Sides({self.sides})가 원래 각 수보다 작아야 합니다.")
+            else:
+                self.report({'WARNING'}, "원통·원뿔 형태의 메쉬를 선택하세요.")
+            return {'CANCELLED'}
+        before = ", ".join(sorted({str(count) for count in done}, key=int))
+        message = f"{len(done)}개 형태를 {before}각에서 {self.sides}각으로 줄였습니다."
+        if failed["shape"] or failed["sides"]:
+            message += f" 처리하지 못한 덩어리 {failed['shape'] + failed['sides']}개는 남겼습니다."
+        self.report({'INFO'}, message)
+        return {'FINISHED'}
+
+
 # 모델링: 마우스 아래 면 위에 바닥을 그리고 노멀 방향으로 높이를 정해 실린더·큐브를 만든다 -----------
 
 # 미리보기 선 색 (Blender 선택색 계열)
@@ -4567,6 +4853,7 @@ classes = [
     MESH_OT_CatMergeEdges,
     MESH_OT_CatBridge,
     MESH_OT_CatTrisToQuads,
+    MESH_OT_CatReduceSides,
     VIEW3D_OT_CatDrawPrimitive,
     VIEW3D_OT_CatIsolateRotate,
     VIEW3D_OT_CatIsolateAlign,
