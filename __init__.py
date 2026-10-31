@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 23, 3),
+    "version": (1, 24, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -415,8 +415,8 @@ class OBJECT_PT_WoodyTool(Panel):
         operator = row.operator(VIEW3D_OT_CatDrawPrimitive.bl_idname, text="Cube", icon='MESH_CUBE')
         operator.shape = 'CUBE'
         layout.operator(MESH_OT_CatTrisToQuads.bl_idname, text="Tris to Quads (Ctrl+Alt+J)", icon='MESH_PLANE')
-        # 원통·원뿔의 둘레 각 수를 형태는 유지한 채 줄인다.
-        layout.operator(MESH_OT_CatReduceSides.bl_idname, text="Reduce Sides", icon='MESH_CIRCLE')
+        # 원통·원뿔의 둘레 각 수를 형태는 유지한 채 줄이거나 늘린다.
+        layout.operator(MESH_OT_CatChangeSides.bl_idname, text="Change Sides", icon='MESH_CIRCLE')
 
         layout.separator(factor=1)
 
@@ -3519,7 +3519,7 @@ def selected_vert_components(verts) -> list:
 
 
 # 둘레 선 판정: 선 방향이 그 자리의 원 접선과 이루는 코사인이 이 값보다 크면 둘레 선으로 본다.
-REDUCE_RING_EDGE_COS = 0.7
+SIDES_RING_EDGE_COS = 0.7
 
 
 def spoke_layout(verts, center: Vector, axis: Vector):
@@ -3562,7 +3562,7 @@ def spoke_layout(verts, center: Vector, axis: Vector):
         if direction.length <= 1e-12 or tangent.length <= 1e-12:
             return None
         alignment = abs(direction.normalized().dot(tangent.normalized()))
-        if alignment > REDUCE_RING_EDGE_COS:
+        if alignment > SIDES_RING_EDGE_COS:
             ring_edges.append((vert, other))
             clarity += alignment
         else:
@@ -3716,9 +3716,10 @@ def topology_spoke_layout(verts):
     return [(angles[number], groups[root]) for number, root in enumerate(roots)], index
 
 
-def spoke_rings(verts, index) -> list:
+def spoke_rings(verts, index, anchor=None) -> list:
     """
     서로 다른 살을 잇는 둘레 선으로 이어진 링을 고리 순서대로 모은다.
+    anchor(정점 집합)를 주면 링 중심을 그 정점들로만 구한다(늘릴 때 현 위에 놓인 새 정점이 중심을 끌지 않게).
 
     Returns:
         [(순서대로 늘어선 링 정점들, 링 중심, 링 노멀)]. 살마다 정점 하나씩 지나는 링만 담는다.
@@ -3748,7 +3749,8 @@ def spoke_rings(verts, index) -> list:
                 break
         if current is not start or len(ring) != count or len({index[vert] for vert in ring}) != count:
             continue
-        center = sum((vert.co for vert in ring), Vector()) / count
+        basis = [vert for vert in ring if anchor is None or vert in anchor] or ring
+        center = sum((vert.co for vert in basis), Vector()) / len(basis)
         # Newell 노멀: 링 순서대로 돌 때 반시계 방향이 되는 노멀
         normal = Vector()
         for position, vert in enumerate(ring):
@@ -3808,25 +3810,172 @@ def pick_kept_spokes(angles: list, sides: int, offset: int):
     return assign((best_anchor + offset) % count)
 
 
-def reduce_sides(bm, verts, sides: int, axis_mode: str, offset: int, keep_area: bool):
+def find_sides_layout(verts, axis_mode: str):
+    """사각형 면 연결로 먼저 찾고(휘어진 관 포함), 옆면이 삼각형인 원뿔 등은 곧은 축 기준으로 찾는다. 실패하면 None."""
+    layout = topology_spoke_layout(verts) if axis_mode == 'AUTO' else None
+    if layout is not None:
+        return layout
+    found = find_spoke_layout(verts, axis_mode)
+    if found is None:
+        return None
+    _center, _axis, (spokes, index, _clarity) = found
+    return spokes, index
+
+
+def respread_rings(rings, index, kept_numbers, sides: int, scale: float, original=None) -> None:
     """
-    원통·원뿔 한 덩어리의 각을 sides개로 줄인다.
+    링마다 남긴 정점을 고른 간격으로 다시 펼친다. 움직임이 가장 작도록 시작 각도를 정하고,
+    정점마다 링 중심에서의 거리와 노멀 방향 높이는 그대로 둔다. scale만큼 반지름을 키운다.
+    original(정점 집합)을 주면 그 밖의 새 정점은 링 순서상 양옆 원래 정점의 거리·높이를 사이 비율로 이어받는다.
+    """
+    for ring, center, normal in rings:
+        remaining = [vert for vert in ring if vert.is_valid and (kept_numbers is None or index[vert] in kept_numbers)]
+        if len(remaining) != sides:
+            continue
+        u = plane_axis(normal, remaining[0].co - center)
+        v = normal.cross(u)
+        polar = []
+        for vert in remaining:
+            offset_vec = vert.co - center
+            height = offset_vec.dot(normal)
+            flat = offset_vec - normal * height
+            polar.append([math.atan2(flat.dot(v), flat.dot(u)), flat.length, height])
+        anchors = [k for k, vert in enumerate(remaining) if original is None or vert in original]
+        if anchors and len(anchors) < sides:
+            for k in range(sides):
+                if k in anchors:
+                    continue
+                before = max((a for a in anchors if a < k), default=anchors[-1] - sides)
+                after = min((a for a in anchors if a > k), default=anchors[0] + sides)
+                t = (k - before) / (after - before)
+                for slot in (1, 2):
+                    polar[k][slot] = polar[before % sides][slot] * (1.0 - t) + polar[after % sides][slot] * t
+        step = 2.0 * math.pi / sides
+        phase = math.atan2(
+            sum(math.sin(angle - step * k) for k, (angle, _r, _h) in enumerate(polar)),
+            sum(math.cos(angle - step * k) for k, (angle, _r, _h) in enumerate(polar)),
+        )
+        for k, (vert, (_angle, radius, height)) in enumerate(zip(remaining, polar)):
+            target = phase + step * k
+            vert.co = center + normal * height + (u * math.cos(target) + v * math.sin(target)) * radius * scale
+
+
+def area_scale(count: int, sides: int) -> float:
+    """정count각형과 단면 넓이가 같아지도록 정sides각형 반지름에 곱할 배율."""
+    return math.sqrt((count * math.sin(2.0 * math.pi / count)) / (sides * math.sin(2.0 * math.pi / sides)))
+
+
+def common_face(a, b):
+    """두 정점을 함께 가진 면 하나. 없으면 None."""
+    faces = set(a.link_faces)
+    return next((face for face in b.link_faces if face in faces), None)
+
+
+def insert_spokes(bm, index, added: int, offset: int):
+    """
+    이웃한 살 사이의 둘레 선을 잘라 새 살을 added개 끼워 넣는다.
+
+    새 살은 살 사이 칸마다 고르게 나누고(남는 몫은 offset 칸만큼 돌린 칸부터 하나씩) 사각형 옆면은 세로로 가르며,
+    부채꼴 뚜껑·원뿔 옆 삼각형은 새 정점을 마주보는 꼭짓점과 잇고 N각형 뚜껑은 정점만 더한다.
+    bmesh.ops.subdivide_edges는 Edit 모드 BMesh의 정점 참조를 모두 무효화하므로 bmesh.utils로 직접 자른다.
 
     Returns:
-        (원래 각 수, 오류 메시지 또는 None)
+        (새 정점 목록, 정점 → 살 번호) 또는 살이 한 바퀴 고리를 이루지 못하면 None.
     """
-    # 사각형 면 연결로 먼저 찾고(휘어진 관 포함), 옆면이 삼각형인 원뿔 등은 곧은 축 기준으로 찾는다.
-    layout = topology_spoke_layout(verts) if axis_mode == 'AUTO' else None
+    gaps = {}
+    for vert, number in index.items():
+        if number < 0:
+            continue
+        for edge in vert.link_edges:
+            other = index.get(edge.other_vert(vert), -1)
+            if other >= 0 and other != number:
+                gaps.setdefault(frozenset((number, other)), set()).add(edge)
+    neighbors = {}
+    for pair in gaps:
+        a, b = tuple(pair)
+        neighbors.setdefault(a, set()).add(b)
+        neighbors.setdefault(b, set()).add(a)
+    order = spoke_cycle_order(neighbors) if set(neighbors) == set(range(len(neighbors))) else None
+    if order is None:
+        return None
+    count = len(order)
+    new_index = dict(index)
+    new_verts = []
+    next_number = count
+    for k in range(count):
+        position = (k - offset) % count
+        cuts = (position + 1) * added // count - position * added // count
+        if not cuts:
+            continue
+        start = order[k]
+        numbers = list(range(next_number, next_number + cuts))
+        next_number += cuts
+        edges = gaps[frozenset((start, order[(k + 1) % count]))]
+        faces = {face for edge in edges for face in edge.link_faces}
+        # 선마다 시작 살 쪽 정점에서 끝 살 쪽으로 고르게 자른 새 정점들
+        splits = {}
+        for edge in edges:
+            a, b = edge.verts
+            if index[a] != start:
+                a, b = b, a
+            origin, end = a.co.copy(), b.co.copy()
+            pieces = []
+            current = edge
+            for i in range(cuts):
+                _edge, vert = bmesh.utils.edge_split(current, a if i == 0 else pieces[-1], 0.5)
+                vert.co = origin.lerp(end, (i + 1) / (cuts + 1))
+                pieces.append(vert)
+                new_index[vert] = numbers[i]
+                current = next(e for e in vert.link_edges if e.other_vert(vert) is b)
+            splits[edge] = (a, b, pieces)
+            new_verts.extend(pieces)
+        for face in faces:
+            if len(face.verts) - cuts * sum(1 for edge in splits if face in edge.link_faces) == 4:
+                cut_rows = [pieces for edge, (_a, _b, pieces) in splits.items() if face in edge.link_faces]
+                if len(cut_rows) == 2:
+                    # 사각형 옆면: 양쪽 둘레 선의 i번째 새 정점끼리 이어 세로로 가른다.
+                    for top, bottom in zip(*cut_rows):
+                        target = common_face(top, bottom)
+                        if target is not None:
+                            bmesh.utils.face_split(target, top, bottom)
+            elif len(face.verts) == 3 + cuts:
+                rows = [ends_pieces for edge, ends_pieces in splits.items() if face in edge.link_faces]
+                if len(rows) == 1:
+                    # 부채꼴·원뿔 삼각형: 새 정점을 마주보는 꼭짓점과 잇는다.
+                    a, b, pieces = rows[0]
+                    apex = next(vert for vert in face.verts if vert not in pieces and vert is not a and vert is not b)
+                    for vert in pieces:
+                        target = common_face(vert, apex)
+                        if target is not None and not any(e.other_vert(vert) is apex for e in vert.link_edges):
+                            bmesh.utils.face_split(target, vert, apex)
+    return new_verts, new_index
+
+
+def change_sides(bm, verts, sides: int, axis_mode: str, offset: int, keep_area: bool):
+    """
+    원통·원뿔 한 덩어리의 각을 sides개로 바꾼다. 줄일 때는 살 일부를 녹이고, 늘릴 때는 살 사이를 잘라 새 살을 넣는다.
+
+    Returns:
+        (원래 각 수, 오류 메시지 또는 None, 새로 생긴 정점 목록)
+    """
+    layout = find_sides_layout(verts, axis_mode)
     if layout is None:
-        found = find_spoke_layout(verts, axis_mode)
-        if found is None:
-            return 0, "shape"
-        _center, _axis, (spokes, index, _clarity) = found
-    else:
-        spokes, index = layout
+        return 0, "shape", []
+    spokes, index = layout
     count = len(spokes)
-    if sides >= count:
-        return count, "sides"
+    if sides == count:
+        return count, "sides", []
+    scale = area_scale(count, sides) if keep_area else 1.0
+    if sides > count:
+        inserted = insert_spokes(bm, index, sides - count, offset)
+        if inserted is None:
+            return count, "shape", []
+        new_verts, new_index = inserted
+        original = set(verts)
+        # 링 중심은 원래 정점으로 구하고, 새 정점은 양옆 원래 정점의 거리·높이를 이어받아 모든 살을 고르게 펼친다.
+        rings = spoke_rings(list(new_index), new_index, anchor=original)
+        respread_rings(rings, new_index, None, sides, scale, original=original)
+        return count, None, new_verts
     kept = pick_kept_spokes([angle for angle, _verts in spokes], sides, offset)
     kept_numbers = {number for number, _target in kept}
     # 지우기 전에 링(순서·중심·노멀)을 구해 둔다. 남긴 정점은 링마다 그 링의 중심과 노멀 둘레에서 다시 펼친다.
@@ -3843,57 +3992,33 @@ def reduce_sides(bm, verts, sides: int, axis_mode: str, offset: int, keep_area: 
     leftover = [vert for vert in removed if vert.is_valid and len(vert.link_edges) == 2]
     if leftover:
         bmesh.ops.dissolve_verts(bm, verts=leftover)
-    # 링마다 남긴 정점을 고른 간격으로 다시 펼친다. 움직임이 가장 작도록 시작 각도를 정하고,
-    # 정점마다 링 중심에서의 거리와 노멀 방향 높이는 그대로 둔다. 원하면 단면 넓이가 같도록 반지름을 넓힌다.
-    scale = 1.0
-    if keep_area:
-        scale = math.sqrt((count * math.sin(2.0 * math.pi / count)) / (sides * math.sin(2.0 * math.pi / sides)))
-    for ring, center, normal in rings:
-        remaining = [vert for vert in ring if index[vert] in kept_numbers and vert.is_valid]
-        if len(remaining) != sides:
-            continue
-        u = plane_axis(normal, remaining[0].co - center)
-        v = normal.cross(u)
-        polar = []
-        for vert in remaining:
-            offset_vec = vert.co - center
-            height = offset_vec.dot(normal)
-            flat = offset_vec - normal * height
-            polar.append((math.atan2(flat.dot(v), flat.dot(u)), flat.length, height))
-        step = 2.0 * math.pi / sides
-        phase = math.atan2(
-            sum(math.sin(angle - step * k) for k, (angle, _r, _h) in enumerate(polar)),
-            sum(math.cos(angle - step * k) for k, (angle, _r, _h) in enumerate(polar)),
-        )
-        for k, (vert, (_angle, radius, height)) in enumerate(zip(remaining, polar)):
-            target = phase + step * k
-            vert.co = center + normal * height + (u * math.cos(target) + v * math.sin(target)) * radius * scale
-    return count, None
+    respread_rings(rings, index, kept_numbers, sides, scale)
+    return count, None, []
 
 
-class MESH_OT_CatReduceSides(Operator):
-    """선택한 원통·원뿔 메쉬(Object 모드에서는 선택한 오브젝트 전체)의 둘레 각 수를 줄입니다. 축 둘레의 정점 줄 일부를 녹이고 남은 줄을 고르게 다시 펼쳐, 높이·반지름·뚜껑은 그대로 둡니다."""
-    bl_idname = "mesh.cat_reduce_sides"
-    bl_label = "Reduce Sides"
+class MESH_OT_CatChangeSides(Operator):
+    """선택한 원통·원뿔 메쉬(Object 모드에서는 선택한 오브젝트 전체)의 둘레 각 수를 줄이거나 늘립니다. 줄일 때는 축 둘레의 정점 줄 일부를 녹이고, 늘릴 때는 정점 줄 사이를 잘라 새 줄을 넣은 뒤 고르게 다시 펼쳐, 높이·반지름·뚜껑은 그대로 둡니다."""
+    bl_idname = "mesh.cat_change_sides"
+    bl_label = "Change Sides"
     bl_options = {'REGISTER', 'UNDO'}
 
     sides: IntProperty(
         name="Sides",
-        description="줄인 뒤의 둘레 각 수. 원래 각 수보다 작아야 합니다",
+        description="바꾼 뒤의 둘레 각 수. 원래보다 작으면 줄이고 크면 늘립니다",
         default=6,
         min=3,
         max=256,
     ) # type: ignore
     offset: IntProperty(
         name="Offset",
-        description="남길 정점 줄을 원래 줄 몇 칸만큼 돌려 고릅니다",
+        description="줄일 때는 남길 정점 줄을, 늘릴 때는 새 줄을 더 넣을 칸을 몇 칸만큼 돌려 고릅니다",
         default=0,
         min=0,
         max=255,
     ) # type: ignore
     keep_area: BoolProperty(
         name="Keep Area",
-        description="각이 줄어 단면이 가늘어 보이지 않도록 반지름을 넓혀 단면 넓이를 유지합니다",
+        description="각 수가 바뀌어도 단면 넓이가 같도록 반지름을 조절합니다",
         default=False,
     ) # type: ignore
     axis: EnumProperty(
@@ -3928,12 +4053,23 @@ class MESH_OT_CatReduceSides(Operator):
                 verts = list(bm.verts)
             changed = False
             for component in selected_vert_components(verts):
-                count, error = reduce_sides(
+                count, error, new_verts = change_sides(
                     bm, component, self.sides, self.axis, self.offset, self.keep_area,
                 )
                 if error is None:
                     done.append(count)
                     changed = True
+                    if edit:
+                        # 새로 넣은 정점 줄도 선택에 포함한다.
+                        for vert in new_verts:
+                            vert.select = True
+                        for vert in new_verts:
+                            for edge in vert.link_edges:
+                                if all(other.select for other in edge.verts):
+                                    edge.select = True
+                            for face in vert.link_faces:
+                                if all(other.select for other in face.verts):
+                                    face.select = True
                 else:
                     failed[error] += 1
             if edit:
@@ -3947,12 +4083,12 @@ class MESH_OT_CatReduceSides(Operator):
                 bm.free()
         if not done:
             if failed["sides"]:
-                self.report({'WARNING'}, f"Sides({self.sides})가 원래 각 수보다 작아야 합니다.")
+                self.report({'WARNING'}, f"Sides({self.sides})가 원래 각 수와 같습니다.")
             else:
                 self.report({'WARNING'}, "원통·원뿔 형태의 메쉬를 선택하세요.")
             return {'CANCELLED'}
         before = ", ".join(sorted({str(count) for count in done}, key=int))
-        message = f"{len(done)}개 형태를 {before}각에서 {self.sides}각으로 줄였습니다."
+        message = f"{len(done)}개 형태를 {before}각에서 {self.sides}각으로 바꿨습니다."
         if failed["shape"] or failed["sides"]:
             message += f" 처리하지 못한 덩어리 {failed['shape'] + failed['sides']}개는 남겼습니다."
         self.report({'INFO'}, message)
@@ -5171,7 +5307,7 @@ classes = [
     MESH_OT_CatMergeEdges,
     MESH_OT_CatBridge,
     MESH_OT_CatTrisToQuads,
-    MESH_OT_CatReduceSides,
+    MESH_OT_CatChangeSides,
     VIEW3D_OT_CatDrawPrimitive,
     VIEW3D_OT_CatIsolateRotate,
     VIEW3D_OT_CatIsolateAlign,

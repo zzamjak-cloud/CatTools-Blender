@@ -29,7 +29,7 @@ SIDEBAR_SMOKE_PATH = ROOT / "tests" / "blender_sidebar_smoke.py"
 PALETTE_SMOKE_PATH = ROOT / "tests" / "blender_palette_smoke.py"
 MERGE_EDGES_SMOKE_PATH = ROOT / "tests" / "blender_merge_edges_smoke.py"
 TRIS_TO_QUADS_SMOKE_PATH = ROOT / "tests" / "blender_tris_to_quads_smoke.py"
-REDUCE_SIDES_SMOKE_PATH = ROOT / "tests" / "blender_reduce_sides_smoke.py"
+CHANGE_SIDES_SMOKE_PATH = ROOT / "tests" / "blender_change_sides_smoke.py"
 PRIMITIVE_SMOKE_PATH = ROOT / "tests" / "blender_draw_primitive_smoke.py"
 ISOLATE_SMOKE_PATH = ROOT / "tests" / "blender_isolate_rotate_smoke.py"
 APPLY_MODIFIERS_SMOKE_PATH = ROOT / "tests" / "blender_apply_modifiers_smoke.py"
@@ -48,7 +48,7 @@ EXPECTED_REGISTERED_CLASSES = [
     "MESH_OT_CatMergeEdges",
     "MESH_OT_CatBridge",
     "MESH_OT_CatTrisToQuads",
-    "MESH_OT_CatReduceSides",
+    "MESH_OT_CatChangeSides",
     "VIEW3D_OT_CatDrawPrimitive",
     "VIEW3D_OT_CatIsolateRotate",
     "VIEW3D_OT_CatIsolateAlign",
@@ -152,7 +152,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], "1.0.0")
         self.assertEqual(manifest["id"], "cat_tools")
         self.assertEqual(manifest["name"], "CatTools")
-        self.assertEqual(manifest["version"], "1.23.3")
+        self.assertEqual(manifest["version"], "1.24.0")
         self.assertEqual(manifest["blender_version_min"], "4.2.0")
         self.assertIn("SPDX:GPL-3.0-or-later", manifest["license"])
 
@@ -165,7 +165,7 @@ class CatToolsSmokeTest(unittest.TestCase):
         )
         info = ast.literal_eval(info_node.value)
         self.assertEqual(info["name"], "CatTools")
-        self.assertEqual(info["version"], (1, 23, 3))
+        self.assertEqual(info["version"], (1, 24, 0))
         self.assertEqual(info["blender"], (4, 2, 0))
 
     def test_registered_class_order(self) -> None:
@@ -524,17 +524,17 @@ class CatToolsSmokeTest(unittest.TestCase):
         compile(source, str(TRIS_TO_QUADS_SMOKE_PATH), "exec")
         self.assertIn("bpy.ops.mesh.cat_tris_to_quads(", source)
 
-    def test_reduce_sides_button(self) -> None:
+    def test_change_sides_button(self) -> None:
         panel = self.classes["OBJECT_PT_WoodyTool"]
         draw = next(
             node
             for node in panel.body
             if isinstance(node, ast.FunctionDef) and node.name == "draw"
         )
-        self.assertIn("MESH_OT_CatReduceSides.bl_idname, text='Reduce Sides'", ast.unparse(draw))
-        source = REDUCE_SIDES_SMOKE_PATH.read_text(encoding="utf-8")
-        compile(source, str(REDUCE_SIDES_SMOKE_PATH), "exec")
-        self.assertIn("bpy.ops.mesh.cat_reduce_sides(", source)
+        self.assertIn("MESH_OT_CatChangeSides.bl_idname, text='Change Sides'", ast.unparse(draw))
+        source = CHANGE_SIDES_SMOKE_PATH.read_text(encoding="utf-8")
+        compile(source, str(CHANGE_SIDES_SMOKE_PATH), "exec")
+        self.assertIn("bpy.ops.mesh.cat_change_sides(", source)
 
     def test_draw_primitive_smoke_is_valid(self) -> None:
         source = PRIMITIVE_SMOKE_PATH.read_text(encoding="utf-8")

@@ -1,4 +1,4 @@
-"""Blender에서 CatTools Modeling의 Reduce Sides(원통·원뿔 둘레 각 줄이기)를 검사합니다."""
+"""Blender에서 CatTools Modeling의 Change Sides(원통·원뿔 둘레 각 줄이기·늘리기)를 검사합니다."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def load_addon():
     if MODULE_NAME in bpy.context.preferences.addons:
         return importlib.import_module(MODULE_NAME), False
 
-    spec = importlib.util.spec_from_file_location("cat_tools_reduce_sides_smoke", ADDON_PATH)
+    spec = importlib.util.spec_from_file_location("cat_tools_change_sides_smoke", ADDON_PATH)
     if spec is None or spec.loader is None:
         raise AssertionError("CatTools 모듈 로더를 생성할 수 없습니다.")
     module = importlib.util.module_from_spec(spec)
@@ -94,8 +94,8 @@ def main() -> None:
         bpy.ops.mesh.primitive_cylinder_add(vertices=12, radius=1.0, depth=2.0, end_fill_type="NGON")
         obj = bpy.context.active_object
         edit(obj)
-        assert module.MESH_OT_CatReduceSides.poll(bpy.context)
-        assert bpy.ops.mesh.cat_reduce_sides(sides=6) == {"FINISHED"}
+        assert module.MESH_OT_CatChangeSides.poll(bpy.context)
+        assert bpy.ops.mesh.cat_change_sides(sides=6) == {"FINISHED"}
         bpy.ops.object.mode_set(mode="OBJECT")
         points = [v.co.copy() for v in obj.data.vertices]
         assert len(points) == 12 and len(obj.data.polygons) == 8, (len(points), len(obj.data.polygons))
@@ -109,7 +109,7 @@ def main() -> None:
         bpy.ops.mesh.primitive_cone_add(vertices=12, radius1=1.0, depth=2.0, end_fill_type="TRIFAN")
         obj = bpy.context.active_object
         edit(obj)
-        assert bpy.ops.mesh.cat_reduce_sides(sides=5) == {"FINISHED"}
+        assert bpy.ops.mesh.cat_change_sides(sides=5) == {"FINISHED"}
         bpy.ops.object.mode_set(mode="OBJECT")
         points = [v.co.copy() for v in obj.data.vertices]
         assert len(points) == 5 + 2, len(points)
@@ -129,7 +129,7 @@ def main() -> None:
         bm.to_mesh(obj.data)
         bm.free()
         edit(obj)
-        assert bpy.ops.mesh.cat_reduce_sides(sides=8) == {"FINISHED"}
+        assert bpy.ops.mesh.cat_change_sides(sides=8) == {"FINISHED"}
         bpy.ops.object.mode_set(mode="OBJECT")
         points = [v.co.copy() for v in obj.data.vertices]
         assert len(points) == 8 * 4 + 2, len(points)
@@ -162,7 +162,7 @@ def main() -> None:
         obj.select_set(True)
         bpy.context.view_layer.objects.active = obj
         bpy.ops.object.mode_set(mode="EDIT")
-        assert bpy.ops.mesh.cat_reduce_sides(sides=6) == {"FINISHED"}
+        assert bpy.ops.mesh.cat_change_sides(sides=6) == {"FINISHED"}
         bpy.ops.object.mode_set(mode="OBJECT")
         assert len(obj.data.vertices) == 12 + 12 + 24, len(obj.data.vertices)
         for sign in (1.0, -1.0):
@@ -178,8 +178,8 @@ def main() -> None:
         clear_scene()
         bpy.ops.mesh.primitive_cylinder_add(vertices=12, radius=1.0, depth=1.0, end_fill_type="NOTHING")
         obj = bpy.context.active_object
-        assert module.MESH_OT_CatReduceSides.poll(bpy.context)
-        assert bpy.ops.mesh.cat_reduce_sides(sides=4, keep_area=True) == {"FINISHED"}
+        assert module.MESH_OT_CatChangeSides.poll(bpy.context)
+        assert bpy.ops.mesh.cat_change_sides(sides=4, keep_area=True) == {"FINISHED"}
         points = [v.co.copy() for v in obj.data.vertices]
         assert len(points) == 8 and len(obj.data.polygons) == 4
         assert evenly_spaced(ring_angles(points, Vector(), z), 4)
@@ -190,12 +190,12 @@ def main() -> None:
         clear_scene()
         bpy.ops.mesh.primitive_cylinder_add(vertices=12)
         obj = bpy.context.active_object
-        assert bpy.ops.mesh.cat_reduce_sides(sides=6) == {"FINISHED"}
+        assert bpy.ops.mesh.cat_change_sides(sides=6) == {"FINISHED"}
         first = ring_angles([v.co.copy() for v in obj.data.vertices], Vector(), z)
         clear_scene()
         bpy.ops.mesh.primitive_cylinder_add(vertices=12)
         obj = bpy.context.active_object
-        assert bpy.ops.mesh.cat_reduce_sides(sides=6, offset=1) == {"FINISHED"}
+        assert bpy.ops.mesh.cat_change_sides(sides=6, offset=1) == {"FINISHED"}
         second = ring_angles([v.co.copy() for v in obj.data.vertices], Vector(), z)
         assert abs(((second[0] - first[0]) % 60.0) - 30.0) < 1e-2, (first, second)
 
@@ -219,7 +219,7 @@ def main() -> None:
         bpy.ops.object.select_all(action="DESELECT")
         obj.select_set(True)
         bpy.context.view_layer.objects.active = obj
-        assert bpy.ops.mesh.cat_reduce_sides(sides=6) == {"FINISHED"}
+        assert bpy.ops.mesh.cat_change_sides(sides=6) == {"FINISHED"}
         assert len(mesh.vertices) == 6 * 6 and len(mesh.polygons) == 6 * 5
         assert all(len(p.vertices) == 4 for p in mesh.polygons)
 
@@ -244,7 +244,7 @@ def main() -> None:
         bpy.ops.object.select_all(action="DESELECT")
         obj.select_set(True)
         bpy.context.view_layer.objects.active = obj
-        assert bpy.ops.mesh.cat_reduce_sides(sides=6) == {"FINISHED"}
+        assert bpy.ops.mesh.cat_change_sides(sides=6) == {"FINISHED"}
         assert len(mesh.vertices) == 6 * 7 and len(mesh.polygons) == 6 * 6
         for center in centers:
             ring = [v.co for v in mesh.vertices if abs((v.co - center).length - 0.3) < 1e-4]
@@ -253,7 +253,83 @@ def main() -> None:
             gaps = [(a - b).length for a in ring for b in ring if a is not b]
             assert abs(min(gaps) - 0.3) < 1e-4, min(gaps)
 
-        # 9) 원통이 아닌 형태(분할한 큐브, 격자 평면)나 원래보다 많은 각은 손대지 않고 취소한다
+        # 9) 늘리기: N각형 뚜껑 6각 실린더 → 13각(칸마다 2개 넣고 남는 하나는 한 칸에 더). 고른 간격, 반지름·높이 유지
+        clear_scene()
+        bpy.ops.mesh.primitive_cylinder_add(vertices=6, radius=1.0, depth=2.0, end_fill_type="NGON")
+        obj = bpy.context.active_object
+        edit(obj)
+        assert bpy.ops.mesh.cat_change_sides(sides=13) == {"FINISHED"}
+        bm = bmesh.from_edit_mesh(obj.data)
+        assert all(v.select for v in bm.verts), "새로 넣은 정점도 선택되어야 합니다"
+        bpy.ops.object.mode_set(mode="OBJECT")
+        points = [v.co.copy() for v in obj.data.vertices]
+        assert len(points) == 26 and len(obj.data.polygons) == 13 + 2, (len(points), len(obj.data.polygons))
+        assert evenly_spaced(ring_angles(points, Vector(), z), 13)
+        assert radii(points, Vector(), z) == [1.0], radii(points, Vector(), z)
+        assert sorted({round(p.z, 4) for p in points}) == [-1.0, 1.0]
+        assert manifold(obj.data)
+
+        # 10) 늘리기: 삼각형 부채꼴 원뿔 5각 → 12각, 세로 3칸 부채꼴 실린더 8각 → 16각(Keep Area)
+        clear_scene()
+        bpy.ops.mesh.primitive_cone_add(vertices=5, radius1=1.0, depth=2.0, end_fill_type="TRIFAN")
+        obj = bpy.context.active_object
+        edit(obj)
+        assert bpy.ops.mesh.cat_change_sides(sides=12) == {"FINISHED"}
+        bpy.ops.object.mode_set(mode="OBJECT")
+        points = [v.co.copy() for v in obj.data.vertices]
+        assert len(points) == 12 + 2 and len(obj.data.polygons) == 24, (len(points), len(obj.data.polygons))
+        assert all(len(p.vertices) == 3 for p in obj.data.polygons)
+        assert evenly_spaced(ring_angles(points, Vector(), z), 12)
+        assert radii(points, Vector(), z) == [1.0]
+        assert manifold(obj.data)
+
+        clear_scene()
+        bpy.ops.mesh.primitive_cylinder_add(vertices=8, radius=0.5, depth=3.0, end_fill_type="TRIFAN")
+        obj = bpy.context.active_object
+        bm = bmesh.new()
+        bm.from_mesh(obj.data)
+        vertical = [e for e in bm.edges if abs((e.verts[0].co - e.verts[1].co).normalized().z) > 0.99]
+        bmesh.ops.subdivide_edges(bm, edges=vertical, cuts=2, use_grid_fill=True)
+        bm.to_mesh(obj.data)
+        bm.free()
+        assert bpy.ops.mesh.cat_change_sides(sides=16, keep_area=True) == {"FINISHED"}
+        points = [v.co.copy() for v in obj.data.vertices]
+        assert len(points) == 16 * 4 + 2, len(points)
+        assert sum(len(p.vertices) == 4 for p in obj.data.polygons) == 16 * 3
+        assert evenly_spaced(ring_angles(points, Vector(), z), 16)
+        expected = 0.5 * math.sqrt((8 * math.sin(2 * math.pi / 8)) / (16 * math.sin(2 * math.pi / 16)))
+        assert abs(radii(points, Vector(), z)[0] - expected) < 1e-3, radii(points, Vector(), z)
+        assert manifold(obj.data)
+
+        # 11) 늘리기: 90° 휘어진 호스 8각 → 12각, 링마다 제자리에서 고르게 펼친다
+        clear_scene()
+        mesh = bpy.data.meshes.new("Hose")
+        obj = bpy.data.objects.new("Hose", mesh)
+        bpy.context.collection.objects.link(obj)
+        bm = bmesh.new()
+        rings = []
+        for r in range(7):
+            frame = Matrix.Rotation(math.radians(15.0 * r), 4, "Y") @ Matrix.Translation((-2.0, 0.0, 0.0))
+            rings.append([bm.verts.new(frame @ Vector((0.3 * math.cos(2 * math.pi * i / 8),
+                                                      0.3 * math.sin(2 * math.pi * i / 8), 0.0))) for i in range(8)])
+        for r in range(6):
+            for i in range(8):
+                bm.faces.new((rings[r][i], rings[r][(i + 1) % 8], rings[r + 1][(i + 1) % 8], rings[r + 1][i]))
+        centers = [sum((v.co for v in ring), Vector()) / 8 for ring in rings]
+        bm.to_mesh(mesh)
+        bm.free()
+        bpy.ops.object.select_all(action="DESELECT")
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        assert bpy.ops.mesh.cat_change_sides(sides=12) == {"FINISHED"}
+        assert len(mesh.vertices) == 12 * 7 and len(mesh.polygons) == 12 * 6
+        for center in centers:
+            ring = [v.co for v in mesh.vertices if abs((v.co - center).length - 0.3) < 1e-4]
+            assert len(ring) == 12, len(ring)
+            gaps = [(a - b).length for a in ring for b in ring if a is not b]
+            assert abs(min(gaps) - 2 * 0.3 * math.sin(math.pi / 12)) < 1e-4, min(gaps)
+
+        # 12) 원통이 아닌 형태(분할한 큐브, 격자 평면)나 원래와 같은 각은 손대지 않고 취소한다
         for add in (lambda: bpy.ops.mesh.primitive_cube_add(), lambda: bpy.ops.mesh.primitive_grid_add()):
             clear_scene()
             add()
@@ -263,14 +339,14 @@ def main() -> None:
             bpy.ops.mesh.subdivide(number_cuts=2)
             bpy.ops.object.mode_set(mode="OBJECT")
             before = len(obj.data.vertices)
-            assert bpy.ops.mesh.cat_reduce_sides(sides=6) == {"CANCELLED"}
+            assert bpy.ops.mesh.cat_change_sides(sides=6) == {"CANCELLED"}
             assert len(obj.data.vertices) == before
         clear_scene()
         bpy.ops.mesh.primitive_cylinder_add(vertices=8)
         obj = bpy.context.active_object
-        assert bpy.ops.mesh.cat_reduce_sides(sides=8) == {"CANCELLED"}
+        assert bpy.ops.mesh.cat_change_sides(sides=8) == {"CANCELLED"}
         assert len(obj.data.vertices) == 16
-        print("CatTools reduce sides smoke: OK")
+        print("CatTools change sides smoke: OK")
     finally:
         if registered_here:
             module.unregister()
