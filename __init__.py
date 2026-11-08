@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 24, 0),
+    "version": (1, 24, 1),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -3624,7 +3624,7 @@ def topology_spoke_layout(verts):
     분류된 선이 없는 정점은 축 위 정점(-1)으로 둔다.
 
     Returns:
-        (살 목록 [(고리 순서 각도, [정점...])], 정점 → 살 번호) 또는 None
+        (살 목록 [(고리 순서 각도, [정점...])], 정점 → 살 번호, 고리에서 이웃한 살 번호 쌍) 또는 None
     """
     inside = set(verts)
     quads = {
@@ -3679,15 +3679,17 @@ def topology_spoke_layout(verts):
         return vert
 
     ring_edges = []
+    chords = []
     for edge in {edge for vert in verts for edge in vert.link_edges}:
         a, b = edge.verts
         if a not in inside or b not in inside:
             continue
         if edge not in kind:
-            # 분류되지 않은 선은 축 위 정점(부채꼴 중심)으로 가는 선만 허용한다.
+            # 분류되지 않은 선은 축 위 정점(부채꼴 중심)으로 가는 선과 삼각형으로 나뉜 뚜껑의 대각선만 허용한다.
             if a in on_axis or b in on_axis:
                 continue
-            return None
+            chords.append((a, b))
+            continue
         if kind[edge] == ring_kind:
             ring_edges.append((a, b))
         else:
@@ -3710,15 +3712,29 @@ def topology_spoke_layout(verts):
     order = spoke_cycle_order(neighbors)
     if order is None:
         return None
+    # 대각선은 같은 링 안의 두 정점을 이어야 한다(옆면 대각선처럼 링을 건너면 원통으로 보지 않는다).
+    ring_root = {vert: vert for edge in ring_edges for vert in edge}
+
+    def ring_of(vert):
+        while ring_root[vert] is not vert:
+            ring_root[vert] = ring_root[ring_root[vert]]
+            vert = ring_root[vert]
+        return vert
+
+    for a, b in ring_edges:
+        ring_root[ring_of(a)] = ring_of(b)
+    if any(a not in ring_root or b not in ring_root or ring_of(a) is not ring_of(b) for a, b in chords):
+        return None
     # 휘어진 관에는 공통 축이 없으므로, 살의 각도는 고리 순서대로 고르게 놓였다고 본다.
     count = len(order)
     angles = {number: 2.0 * math.pi * position / count for position, number in enumerate(order)}
-    return [(angles[number], groups[root]) for number, root in enumerate(roots)], index
+    adjacent = {frozenset((number, other)) for number, linked in neighbors.items() for other in linked}
+    return [(angles[number], groups[root]) for number, root in enumerate(roots)], index, adjacent
 
 
-def spoke_rings(verts, index, anchor=None) -> list:
+def spoke_rings(verts, index, adjacent, anchor=None) -> list:
     """
-    서로 다른 살을 잇는 둘레 선으로 이어진 링을 고리 순서대로 모은다.
+    고리에서 이웃한 살끼리 잇는 둘레 선으로 이어진 링을 고리 순서대로 모은다(뚜껑 대각선은 뺀다).
     anchor(정점 집합)를 주면 링 중심을 그 정점들로만 구한다(늘릴 때 현 위에 놓인 새 정점이 중심을 끌지 않게).
 
     Returns:
@@ -3730,7 +3746,7 @@ def spoke_rings(verts, index, anchor=None) -> list:
             continue
         for edge in vert.link_edges:
             other = edge.other_vert(vert)
-            if index.get(other, -1) >= 0 and index[other] != index[vert]:
+            if index.get(other, -1) >= 0 and frozenset((index[vert], index[other])) in adjacent:
                 links.setdefault(vert, []).append(other)
     count = len({number for number in index.values() if number >= 0})
     rings = []
@@ -3819,7 +3835,14 @@ def find_sides_layout(verts, axis_mode: str):
     if found is None:
         return None
     _center, _axis, (spokes, index, _clarity) = found
-    return spokes, index
+    # 곧은 축 판정에서는 서로 다른 살을 잇는 선이 모두 둘레 선이다.
+    adjacent = {
+        frozenset((number, index[edge.other_vert(vert)]))
+        for vert, number in index.items() if number >= 0
+        for edge in vert.link_edges
+        if index.get(edge.other_vert(vert), -1) >= 0 and index[edge.other_vert(vert)] != number
+    }
+    return spokes, index, adjacent
 
 
 def respread_rings(rings, index, kept_numbers, sides: int, scale: float, original=None) -> None:
@@ -3871,7 +3894,7 @@ def common_face(a, b):
     return next((face for face in b.link_faces if face in faces), None)
 
 
-def insert_spokes(bm, index, added: int, offset: int):
+def insert_spokes(bm, index, adjacent, added: int, offset: int):
     """
     이웃한 살 사이의 둘레 선을 잘라 새 살을 added개 끼워 넣는다.
 
@@ -3880,7 +3903,7 @@ def insert_spokes(bm, index, added: int, offset: int):
     bmesh.ops.subdivide_edges는 Edit 모드 BMesh의 정점 참조를 모두 무효화하므로 bmesh.utils로 직접 자른다.
 
     Returns:
-        (새 정점 목록, 정점 → 살 번호) 또는 살이 한 바퀴 고리를 이루지 못하면 None.
+        (새 정점 목록, 정점 → 살 번호, 이웃한 살 쌍) 또는 살이 한 바퀴 고리를 이루지 못하면 None.
     """
     gaps = {}
     for vert, number in index.items():
@@ -3888,7 +3911,7 @@ def insert_spokes(bm, index, added: int, offset: int):
             continue
         for edge in vert.link_edges:
             other = index.get(edge.other_vert(vert), -1)
-            if other >= 0 and other != number:
+            if other >= 0 and frozenset((number, other)) in adjacent:
                 gaps.setdefault(frozenset((number, other)), set()).add(edge)
     neighbors = {}
     for pair in gaps:
@@ -3900,16 +3923,19 @@ def insert_spokes(bm, index, added: int, offset: int):
         return None
     count = len(order)
     new_index = dict(index)
+    new_adjacent = set()
     new_verts = []
     next_number = count
     for k in range(count):
         position = (k - offset) % count
         cuts = (position + 1) * added // count - position * added // count
-        if not cuts:
-            continue
         start = order[k]
         numbers = list(range(next_number, next_number + cuts))
         next_number += cuts
+        chain = [start] + numbers + [order[(k + 1) % count]]
+        new_adjacent.update(frozenset(pair) for pair in zip(chain, chain[1:]))
+        if not cuts:
+            continue
         edges = gaps[frozenset((start, order[(k + 1) % count]))]
         faces = {face for edge in edges for face in edge.link_faces}
         # 선마다 시작 살 쪽 정점에서 끝 살 쪽으로 고르게 자른 새 정점들
@@ -3944,11 +3970,13 @@ def insert_spokes(bm, index, added: int, offset: int):
                     # 부채꼴·원뿔 삼각형: 새 정점을 마주보는 꼭짓점과 잇는다.
                     a, b, pieces = rows[0]
                     apex = next(vert for vert in face.verts if vert not in pieces and vert is not a and vert is not b)
+                    if index.get(apex) != -1:
+                        continue
                     for vert in pieces:
                         target = common_face(vert, apex)
                         if target is not None and not any(e.other_vert(vert) is apex for e in vert.link_edges):
                             bmesh.utils.face_split(target, vert, apex)
-    return new_verts, new_index
+    return new_verts, new_index, new_adjacent
 
 
 def change_sides(bm, verts, sides: int, axis_mode: str, offset: int, keep_area: bool):
@@ -3961,25 +3989,46 @@ def change_sides(bm, verts, sides: int, axis_mode: str, offset: int, keep_area: 
     layout = find_sides_layout(verts, axis_mode)
     if layout is None:
         return 0, "shape", []
-    spokes, index = layout
+    spokes, index, adjacent = layout
+    # 바꿀 것은 옆면의 각이므로, 뚜껑을 삼각형 등으로 나눈 대각선(이웃하지 않은 살을 잇는 선)은 먼저 녹여 N각형 뚜껑으로 만든다.
+    chords = {
+        edge for vert, number in index.items() if number >= 0 for edge in vert.link_edges
+        if index.get(edge.other_vert(vert), -1) >= 0
+        and index[edge.other_vert(vert)] != number
+        and frozenset((number, index[edge.other_vert(vert)])) not in adjacent
+    }
+    if chords:
+        # 양쪽에 면이 있는 대각선은 녹여 면을 합치고, 열린 쪽 경계에 걸린 뚜껑 조각은 대각선과 함께 지운다(정점은 남긴다).
+        inner = [edge for edge in chords if len(edge.link_faces) == 2]
+        if inner:
+            bmesh.ops.dissolve_edges(bm, edges=inner, use_verts=False, use_face_split=False)
+        outer = [edge for edge in chords if edge.is_valid]
+        if outer:
+            bmesh.ops.delete(bm, geom=outer, context='EDGES')
+        verts = [vert for vert in verts if vert.is_valid]
+        layout = find_sides_layout(verts, axis_mode)
+        if layout is None:
+            return 0, "shape", []
+        spokes, index, adjacent = layout
     count = len(spokes)
     if sides == count:
-        return count, "sides", []
+        # 같은 각 수도 성공으로 끝내야 Redo 패널이 떠서 바로 다른 값으로 바꿀 수 있다.
+        return count, None, []
     scale = area_scale(count, sides) if keep_area else 1.0
     if sides > count:
-        inserted = insert_spokes(bm, index, sides - count, offset)
+        inserted = insert_spokes(bm, index, adjacent, sides - count, offset)
         if inserted is None:
             return count, "shape", []
-        new_verts, new_index = inserted
+        new_verts, new_index, new_adjacent = inserted
         original = set(verts)
         # 링 중심은 원래 정점으로 구하고, 새 정점은 양옆 원래 정점의 거리·높이를 이어받아 모든 살을 고르게 펼친다.
-        rings = spoke_rings(list(new_index), new_index, anchor=original)
+        rings = spoke_rings(list(new_index), new_index, new_adjacent, anchor=original)
         respread_rings(rings, new_index, None, sides, scale, original=original)
         return count, None, new_verts
     kept = pick_kept_spokes([angle for angle, _verts in spokes], sides, offset)
     kept_numbers = {number for number, _target in kept}
     # 지우기 전에 링(순서·중심·노멀)을 구해 둔다. 남긴 정점은 링마다 그 링의 중심과 노멀 둘레에서 다시 펼친다.
-    rings = spoke_rings(verts, index)
+    rings = spoke_rings(verts, index, adjacent)
     removed = {vert for number, (_angle, spoke) in enumerate(spokes) if number not in kept_numbers for vert in spoke}
     # 지울 살 안의 선(세로·지름 방향)과 그 살에서 축 위 정점으로 가는 선을 녹인다. 남은 둘레 정점도 함께 녹인다.
     edges = {
@@ -4042,7 +4091,7 @@ class MESH_OT_CatChangeSides(Operator):
         edit = context.mode == 'EDIT_MESH'
         objects = edit_mesh_objects(context) if edit else [obj for obj in context.selected_objects if obj.type == 'MESH']
         done = []
-        failed = {"shape": 0, "sides": 0}
+        failed = {"shape": 0}
         for obj in objects:
             if edit:
                 bm = bmesh.from_edit_mesh(obj.data)
@@ -4082,15 +4131,12 @@ class MESH_OT_CatChangeSides(Operator):
                     obj.data.update()
                 bm.free()
         if not done:
-            if failed["sides"]:
-                self.report({'WARNING'}, f"Sides({self.sides})가 원래 각 수와 같습니다.")
-            else:
-                self.report({'WARNING'}, "원통·원뿔 형태의 메쉬를 선택하세요.")
+            self.report({'WARNING'}, "원통·원뿔 형태의 메쉬를 선택하세요.")
             return {'CANCELLED'}
         before = ", ".join(sorted({str(count) for count in done}, key=int))
         message = f"{len(done)}개 형태를 {before}각에서 {self.sides}각으로 바꿨습니다."
-        if failed["shape"] or failed["sides"]:
-            message += f" 처리하지 못한 덩어리 {failed['shape'] + failed['sides']}개는 남겼습니다."
+        if failed["shape"]:
+            message += f" 처리하지 못한 덩어리 {failed['shape']}개는 남겼습니다."
         self.report({'INFO'}, message)
         return {'FINISHED'}
 

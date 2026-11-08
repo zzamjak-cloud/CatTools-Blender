@@ -329,7 +329,36 @@ def main() -> None:
             gaps = [(a - b).length for a in ring for b in ring if a is not b]
             assert abs(min(gaps) - 2 * 0.3 * math.sin(math.pi / 12)) < 1e-4, min(gaps)
 
-        # 12) 원통이 아닌 형태(분할한 큐브, 격자 평면)나 원래와 같은 각은 손대지 않고 취소한다
+        # 12) 뚜껑 대각선은 먼저 정리한다: 삼각형으로 나뉜 뚜껑은 N각형으로 합치고,
+        #     아래가 뚫린 실린더에 남은 뚜껑 조각 삼각형은 지운다. 옆면만 사각형으로 남는다
+        for sides, triangulate in ((16, False), (5, False), (16, True), (5, True)):
+            clear_scene()
+            bpy.ops.mesh.primitive_cylinder_add(vertices=10, radius=1.0, depth=0.2, end_fill_type="NGON")
+            obj = bpy.context.active_object
+            bm = bmesh.new()
+            bm.from_mesh(obj.data)
+            bottom_cap = next(f for f in bm.faces if len(f.verts) == 10 and f.calc_center_median().z < 0)
+            if triangulate:
+                bmesh.ops.triangulate(bm, faces=[f for f in bm.faces if len(f.verts) == 10])
+            else:
+                rim = sorted(bottom_cap.verts, key=lambda v: math.atan2(v.co.y, v.co.x))[:3]
+                bmesh.ops.delete(bm, geom=[bottom_cap], context="FACES_ONLY")
+                bm.faces.new(rim)
+            bm.to_mesh(obj.data)
+            bm.free()
+            edit(obj)
+            assert bpy.ops.mesh.cat_change_sides(sides=sides) == {"FINISHED"}, sides
+            bpy.ops.object.mode_set(mode="OBJECT")
+            points = [v.co.copy() for v in obj.data.vertices]
+            assert evenly_spaced(ring_angles(points, Vector(), z), sides), (sides, triangulate, ring_angles(points, Vector(), z))
+            assert radii(points, Vector(), z) == [1.0], (sides, triangulate, radii(points, Vector(), z))
+            assert sorted({round(p.z, 4) for p in points}) == [-0.1, 0.1]
+            assert len(points) == sides * 2, (sides, triangulate, len(points))
+            faces = sorted(len(p.vertices) for p in obj.data.polygons)
+            assert faces == [4] * sides + [sides] * (2 if triangulate else 1), (sides, triangulate, faces)
+            assert not triangulate or manifold(obj.data)
+
+        # 13) 원통이 아닌 형태(분할한 큐브, 격자 평면)는 취소하고, 원래와 같은 각은 형태를 유지한 채 성공해 Redo 패널을 띄운다
         for add in (lambda: bpy.ops.mesh.primitive_cube_add(), lambda: bpy.ops.mesh.primitive_grid_add()):
             clear_scene()
             add()
@@ -344,7 +373,7 @@ def main() -> None:
         clear_scene()
         bpy.ops.mesh.primitive_cylinder_add(vertices=8)
         obj = bpy.context.active_object
-        assert bpy.ops.mesh.cat_change_sides(sides=8) == {"CANCELLED"}
+        assert bpy.ops.mesh.cat_change_sides(sides=8) == {"FINISHED"}
         assert len(obj.data.vertices) == 16
         print("CatTools change sides smoke: OK")
     finally:
