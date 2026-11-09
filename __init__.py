@@ -3,7 +3,7 @@
 bl_info = {
     "name": "CatTools",
     "author": "Woody",
-    "version": (1, 24, 1),
+    "version": (1, 25, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > CatTools 탭",
     "description": "CAT 블록 모델링에 유용한 도구 모음",
@@ -3979,13 +3979,287 @@ def insert_spokes(bm, index, adjacent, added: int, offset: int):
     return new_verts, new_index, new_adjacent
 
 
+# 뚜껑 판정: 뚜껑 정점이 테두리 링 평면에서 링 반지름의 이 비율 이내면 평평한 뚜껑으로 본다.
+SIDES_CAP_FLATNESS = 0.02
+# 뚜껑 테두리 링의 정점 거리(중심 기준) 최대/최소 비율 한도. 분할한 상자처럼 각진 고리는 원통으로 보지 않는다.
+SIDES_CAP_ROUNDNESS = 1.3
+
+
+def quad_tube_bands(faces) -> list:
+    """
+    사각형을 마주보는 선으로 건너가며 한 바퀴 닫히는 띠를 모두 찾는다.
+
+    Returns:
+        [(띠 면 집합, (옆 고리 정점 집합 둘))]. 옆 두 고리가 서로 겹치지 않는 닫힌 고리인 띠만 담는다.
+    """
+    quads = {face for face in faces if len(face.verts) == 4}
+    bands = []
+    seen = set()
+    for start in quads:
+        for direction in (0, 1):
+            if (start, direction) in seen:
+                continue
+            entry = start.loops[direction].edge
+            band = []
+            sides_edges = []
+            face, edge, closed = start, entry, False
+            while True:
+                edges = [loop.edge for loop in face.loops]
+                position = edges.index(edge)
+                band.append(face)
+                sides_edges += [edges[(position + 1) % 4], edges[(position + 3) % 4]]
+                exit_edge = edges[(position + 2) % 4]
+                linked = [other for other in exit_edge.link_faces if other is not face]
+                if len(exit_edge.link_faces) != 2 or linked[0] not in quads:
+                    break
+                face, edge = linked[0], exit_edge
+                if face is start:
+                    closed = edge is entry
+                    break
+                if face in band:
+                    break
+            for member in band:
+                # 같은 띠를 다른 면에서 다시 걷지 않도록 띠 방향을 표시한다.
+                for k in (0, 1):
+                    if member.loops[k].edge in sides_edges:
+                        seen.add((member, 1 - k))
+            if not closed or len(set(band)) != len(band):
+                continue
+            degree = {}
+            for side in sides_edges:
+                for vert in side.verts:
+                    degree[vert] = degree.get(vert, 0) + 1
+            if len(set(sides_edges)) != 2 * len(band) or len(degree) != 2 * len(band):
+                continue
+            if any(count != 2 for count in degree.values()):
+                continue
+            # 옆 고리는 옆 선으로만 잇는다(띠를 가로지르는 선으로 이으면 두 고리가 하나로 붙는다).
+            links = {}
+            for side in sides_edges:
+                x, y = side.verts
+                links.setdefault(x, []).append(y)
+                links.setdefault(y, []).append(x)
+            loops = []
+            left = set(links)
+            while left:
+                todo = [left.pop()]
+                loop = set(todo)
+                while todo:
+                    for other in links[todo.pop()]:
+                        if other in left:
+                            left.discard(other)
+                            loop.add(other)
+                            todo.append(other)
+                loops.append(loop)
+            if len(loops) != 2:
+                continue
+            bands.append((frozenset(band), tuple(frozenset(loop) for loop in loops)))
+    return bands
+
+
+def loop_round_enough(loop) -> bool:
+    center = sum((vert.co for vert in loop), Vector()) / len(loop)
+    distances = [(vert.co - center).length for vert in loop]
+    return min(distances) > 1e-9 and max(distances) / min(distances) <= SIDES_CAP_ROUNDNESS
+
+
+def find_tube_caps(verts):
+    """
+    옆면(사각형 띠가 겹겹이 쌓인 관)과 양 끝 뚜껑을 나눈다. 뚜껑은 끝 고리 하나에만 붙은 평평한 면 덩어리다.
+
+    Returns:
+        ([(뚜껑 면 목록, 끝 고리 정점 집합, 고리를 모두 덮는지)], 옆면 정점 집합) 또는 관 형태를 못 찾으면 None
+    """
+    inside = set(verts)
+    faces = {face for vert in verts for face in vert.link_faces if all(other in inside for other in face.verts)}
+    bands = quad_tube_bands(faces)
+    if not bands:
+        return None
+    by_loop = {}
+    for number, (_band, loops) in enumerate(bands):
+        for loop in loops:
+            by_loop.setdefault(loop, []).append(number)
+    best = None
+    visited = set()
+    for first in range(len(bands)):
+        if first in visited:
+            continue
+        # 고리를 공유하며 쌓인 같은 길이의 띠 묶음
+        stack, todo = {first}, [first]
+        while todo:
+            number = todo.pop()
+            for loop in bands[number][1]:
+                for other in by_loop[loop]:
+                    if other not in stack and len(bands[other][0]) == len(bands[first][0]):
+                        stack.add(other)
+                        todo.append(other)
+        visited |= stack
+        loop_use = {}
+        for number in stack:
+            for loop in bands[number][1]:
+                loop_use[loop] = loop_use.get(loop, 0) + 1
+        if any(count > 2 for count in loop_use.values()):
+            continue
+        tube = set().union(*(bands[number][0] for number in stack))
+        if sum(len(bands[number][0]) for number in stack) != len(tube):
+            continue
+        ends = [loop for loop, count in loop_use.items() if count == 1]
+        # 옆면 밖 면을 선으로 이어진 덩어리로 나누고, 덩어리마다 붙은 끝 고리를 찾는다.
+        rest = faces - tube
+        caps = []
+        valid = True
+        while rest and valid:
+            seed = rest.pop()
+            group, todo = [seed], [seed]
+            while todo:
+                face = todo.pop()
+                for edge in face.edges:
+                    for other in edge.link_faces:
+                        if other in rest:
+                            rest.discard(other)
+                            group.append(other)
+                            todo.append(other)
+            touching = {vert for face in group for vert in face.verts} & {vert for face in tube for vert in face.verts}
+            owners = [loop for loop in ends if touching and touching <= loop]
+            if len(owners) != 1:
+                valid = False
+                break
+            caps.append((group, owners[0]))
+        if not valid or len({id(loop) for _group, loop in caps}) != len(caps):
+            continue
+        if any(not loop_round_enough(loop) for loop in ends):
+            continue
+        flat = []
+        for group, loop in caps:
+            center = sum((vert.co for vert in loop), Vector()) / len(loop)
+            normal = Vector()
+            ring = order_loop(loop)
+            for position, vert in enumerate(ring):
+                normal += (vert.co - center).cross(ring[(position + 1) % len(ring)].co - center)
+            radius = sum((vert.co - center).length for vert in loop) / len(loop)
+            if normal.length <= 1e-12 or radius <= 1e-12:
+                continue
+            normal.normalize()
+            limit = SIDES_CAP_FLATNESS * radius
+            if all(abs((vert.co - center).dot(normal)) <= limit for face in group for vert in face.verts):
+                full = all(len(edge.link_faces) == 2 for edge in loop_edges(ring))
+                flat.append((group, loop, full))
+        score = (len(flat), len(tube))
+        if best is None or score > best[0]:
+            best = (score, flat, {vert for face in tube for vert in face.verts})
+    return None if best is None else best[1:]
+
+
+def order_loop(loop) -> list:
+    """닫힌 고리 정점 집합을 선 연결 순서대로 늘어놓는다."""
+    start = next(iter(loop))
+    ring = [start]
+    previous, current = None, start
+    while True:
+        nxt = next((edge.other_vert(current) for edge in current.link_edges
+                    if edge.other_vert(current) in loop and edge.other_vert(current) is not previous
+                    and is_loop_edge(edge, loop)), None)
+        if nxt is None or nxt is start:
+            break
+        ring.append(nxt)
+        previous, current = current, nxt
+    return ring
+
+
+def is_loop_edge(edge, loop) -> bool:
+    """고리 안 두 정점을 잇는 선 중 옆면(고리 밖 정점을 가진 사각형)에 닿은 선만 고리 선으로 본다(뚜껑 대각선 제외)."""
+    return any(len(face.verts) == 4 and any(vert not in loop for vert in face.verts) for face in edge.link_faces)
+
+
+def loop_edges(ring) -> list:
+    return [
+        next(edge for edge in vert.link_edges if edge.other_vert(vert) is ring[(position + 1) % len(ring)])
+        for position, vert in enumerate(ring)
+    ]
+
+
+def strip_tube_caps(bm, verts, axis_mode: str):
+    """
+    평평한 뚜껑을 지운다. 고리를 모두 덮던 뚜껑은 다시 채울 수 있게 고리 정점과 면 속성을 돌려준다.
+
+    Returns:
+        (남은 정점 목록, [(고리 정점 목록, 머티리얼 번호, 스무스)])
+    """
+    found = find_tube_caps(verts)
+    if found is None or not found[0]:
+        return verts, []
+    caps, tube_verts = found
+    # 옆면만으로 살을 못 찾으면 지우지 않는다(실패해도 메쉬를 건드리지 않게).
+    if find_sides_layout(list(tube_verts), axis_mode) is None:
+        return verts, []
+    refill = []
+    doomed = []
+    for group, loop, full in caps:
+        if full:
+            refill.append((list(loop), group[0].material_index, group[0].smooth))
+        doomed += group
+    bmesh.ops.delete(bm, geom=doomed, context='FACES')
+    return [vert for vert in verts if vert.is_valid], refill
+
+
+def refill_tube_caps(bm, verts, refill, select: bool) -> None:
+    """뚜껑을 지운 고리마다 남은 열린 테두리를 면 하나로 채우고 옆면과 감는 방향을 맞춘다."""
+    inside = {vert for vert in verts if vert.is_valid}
+    open_edges = {edge for vert in inside for edge in vert.link_edges
+                  if len(edge.link_faces) == 1 and all(other in inside for other in edge.verts)}
+    for loop, material, smooth in refill:
+        alive = {vert for vert in loop if vert.is_valid}
+        border = set()
+        todo = [edge for edge in open_edges if any(vert in alive for vert in edge.verts)]
+        while todo:
+            edge = todo.pop()
+            if edge in border:
+                continue
+            border.add(edge)
+            for vert in edge.verts:
+                todo += [other for other in vert.link_edges if other in open_edges and other not in border]
+        if len(border) < 3:
+            continue
+        open_edges -= border
+        created = bmesh.ops.holes_fill(bm, edges=list(border), sides=0)['faces']
+        for face in created:
+            face.material_index = material
+            face.smooth = smooth
+            # 옆면과 공유한 선을 같은 방향으로 지나면 반대로 감긴 것이다.
+            loop_ = face.loops[0]
+            neighbor = next((other for other in loop_.edge.link_loops if other.face is not face), None)
+            if neighbor is not None and neighbor.vert is loop_.vert:
+                face.normal_flip()
+            if select:
+                face.select = True
+
+
 def change_sides(bm, verts, sides: int, axis_mode: str, offset: int, keep_area: bool):
     """
     원통·원뿔 한 덩어리의 각을 sides개로 바꾼다. 줄일 때는 살 일부를 녹이고, 늘릴 때는 살 사이를 잘라 새 살을 넣는다.
+    평평한 뚜껑은 먼저 지우고 각을 바꾼 뒤 면 하나로 다시 채운다(뚜껑 안쪽 선·정점은 남기지 않는다).
 
     Returns:
         (원래 각 수, 오류 메시지 또는 None, 새로 생긴 정점 목록)
     """
+    select = all(vert.select for vert in verts)
+    verts, refill = strip_tube_caps(bm, verts, axis_mode)
+    count, error, new_verts = change_side_spokes(bm, verts, sides, axis_mode, offset, keep_area)
+    if refill:
+        refill_tube_caps(bm, list(verts) + list(new_verts), refill, select)
+    if select and error is None:
+        # 녹여 합친 면은 선택이 풀리므로(면 선택 모드), 덩어리 전체를 골랐다면 결과 면도 모두 다시 고른다.
+        for vert in list(verts) + list(new_verts):
+            if vert.is_valid:
+                vert.select = True
+                for face in vert.link_faces:
+                    if all(other.select for other in face.verts):
+                        face.select = True
+    return count, error, new_verts
+
+
+def change_side_spokes(bm, verts, sides: int, axis_mode: str, offset: int, keep_area: bool):
+    """옆면 살을 줄이거나 늘린다. change_sides 참고."""
     layout = find_sides_layout(verts, axis_mode)
     if layout is None:
         return 0, "shape", []

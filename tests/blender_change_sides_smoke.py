@@ -74,6 +74,11 @@ def manifold(mesh) -> bool:
     return result
 
 
+def outward(mesh) -> bool:
+    """원점 중심 닫힌 형태에서 모든 면 노멀이 바깥(면 중심 방향)을 보는지."""
+    return all(p.normal.dot(p.center) > 0 for p in mesh.polygons)
+
+
 def radii(points, center: Vector, axis: Vector):
     values = []
     for point in points:
@@ -99,6 +104,7 @@ def main() -> None:
         bpy.ops.object.mode_set(mode="OBJECT")
         points = [v.co.copy() for v in obj.data.vertices]
         assert len(points) == 12 and len(obj.data.polygons) == 8, (len(points), len(obj.data.polygons))
+        assert outward(obj.data)
         assert evenly_spaced(ring_angles(points, Vector(), z), 6)
         assert radii(points, Vector(), z) == [1.0], radii(points, Vector(), z)
         assert sorted({round(p.z, 4) for p in points}) == [-1.0, 1.0]
@@ -118,7 +124,7 @@ def main() -> None:
         assert evenly_spaced(ring_angles(points, Vector(), z), 5)
         assert manifold(obj.data)
 
-        # 3) 세로로 3칸 나뉜 부채꼴 뚜껑 실린더 12각 → 8각: 링마다 8각, 사각형 옆면 유지
+        # 3) 세로로 3칸 나뉜 부채꼴 뚜껑 실린더 12각 → 8각: 링마다 8각, 사각형 옆면 유지, 뚜껑은 8각형 면 하나로 다시 채움
         clear_scene()
         bpy.ops.mesh.primitive_cylinder_add(vertices=12, radius=0.5, depth=3.0, end_fill_type="TRIFAN")
         obj = bpy.context.active_object
@@ -132,8 +138,9 @@ def main() -> None:
         assert bpy.ops.mesh.cat_change_sides(sides=8) == {"FINISHED"}
         bpy.ops.object.mode_set(mode="OBJECT")
         points = [v.co.copy() for v in obj.data.vertices]
-        assert len(points) == 8 * 4 + 2, len(points)
-        assert sum(len(p.vertices) == 4 for p in obj.data.polygons) == 8 * 3
+        assert len(points) == 8 * 4, len(points)
+        assert sorted(len(p.vertices) for p in obj.data.polygons) == [4] * 8 * 3 + [8, 8]
+        assert outward(obj.data)
         assert evenly_spaced(ring_angles(points, Vector(), z), 8)
         assert radii(points, Vector(), z) == [0.5]
         assert manifold(obj.data)
@@ -294,8 +301,9 @@ def main() -> None:
         bm.free()
         assert bpy.ops.mesh.cat_change_sides(sides=16, keep_area=True) == {"FINISHED"}
         points = [v.co.copy() for v in obj.data.vertices]
-        assert len(points) == 16 * 4 + 2, len(points)
-        assert sum(len(p.vertices) == 4 for p in obj.data.polygons) == 16 * 3
+        assert len(points) == 16 * 4, len(points)
+        assert sorted(len(p.vertices) for p in obj.data.polygons) == [4] * 16 * 3 + [16, 16]
+        assert outward(obj.data)
         assert evenly_spaced(ring_angles(points, Vector(), z), 16)
         expected = 0.5 * math.sqrt((8 * math.sin(2 * math.pi / 8)) / (16 * math.sin(2 * math.pi / 16)))
         assert abs(radii(points, Vector(), z)[0] - expected) < 1e-3, radii(points, Vector(), z)
@@ -358,7 +366,49 @@ def main() -> None:
             assert faces == [4] * sides + [sides] * (2 if triangulate else 1), (sides, triangulate, faces)
             assert not triangulate or manifold(obj.data)
 
-        # 13) 원통이 아닌 형태(분할한 큐브, 격자 평면)는 취소하고, 원래와 같은 각은 형태를 유지한 채 성공해 Redo 패널을 띄운다
+        # 13) 그리드로 채운 뚜껑·안쪽 정점이 있는 뚜껑도 막히지 않는다: 뚜껑을 지우고 N각형 면 하나로 다시 채운다
+        for sides, poke in ((5, False), (12, False), (8, True), (6, True)):
+            clear_scene()
+            bpy.ops.mesh.primitive_cylinder_add(vertices=8, radius=1.0, depth=2.0, end_fill_type="NGON")
+            obj = bpy.context.active_object
+            bpy.ops.object.mode_set(mode="EDIT")
+            bpy.ops.mesh.select_mode(type="FACE")
+            bpy.ops.object.mode_set(mode="OBJECT")
+            for p in obj.data.polygons:
+                p.select = len(p.vertices) == 8
+            bpy.ops.object.mode_set(mode="EDIT")
+            bpy.ops.mesh.delete(type="ONLY_FACE")
+            for top in (True, False):
+                bpy.ops.object.mode_set(mode="OBJECT")
+                for p in obj.data.polygons:
+                    p.select = False
+                for v in obj.data.vertices:
+                    v.select = (v.co.z > 0) == top
+                for e in obj.data.edges:
+                    e.select = all((obj.data.vertices[i].co.z > 0) == top for i in e.vertices)
+                bpy.ops.object.mode_set(mode="EDIT")
+                bpy.ops.mesh.fill_grid(span=2)
+            if poke:
+                # 그리드 뚜껑 면을 다시 쪼개 안쪽 정점·삼각형이 섞인 뚜껑을 만든다
+                bpy.ops.object.mode_set(mode="OBJECT")
+                for p in obj.data.polygons:
+                    p.select = abs(p.normal.z) > 0.99
+                bpy.ops.object.mode_set(mode="EDIT")
+                bpy.ops.mesh.poke()
+            bpy.ops.object.mode_set(mode="OBJECT")
+            assert all(len(p.vertices) != 8 for p in obj.data.polygons)
+            edit(obj)
+            assert bpy.ops.mesh.cat_change_sides(sides=sides) == {"FINISHED"}, (sides, poke)
+            bpy.ops.object.mode_set(mode="OBJECT")
+            points = [v.co.copy() for v in obj.data.vertices]
+            assert len(points) == sides * 2, (sides, poke, len(points))
+            assert sorted(len(p.vertices) for p in obj.data.polygons) == [4] * sides + [sides] * 2, (sides, poke)
+            assert evenly_spaced(ring_angles(points, Vector(), z), sides)
+            assert radii(points, Vector(), z) == [1.0]
+            assert manifold(obj.data) and outward(obj.data), (sides, poke)
+            assert all(p.select for p in obj.data.polygons), (sides, poke, [(len(p.vertices), p.select) for p in obj.data.polygons])
+
+        # 14) 원통이 아닌 형태(분할한 큐브, 격자 평면)는 취소하고, 원래와 같은 각은 형태를 유지한 채 성공해 Redo 패널을 띄운다
         for add in (lambda: bpy.ops.mesh.primitive_cube_add(), lambda: bpy.ops.mesh.primitive_grid_add()):
             clear_scene()
             add()
